@@ -1,0 +1,45 @@
+{
+  "name": "敏捷回顾会",
+  "description": "用于持续改进的迭代回顾会模板。",
+  "sections": [
+    {
+      "title": "迭代",
+      "instruction": "迭代名称/编号和日期范围",
+      "format": "string"
+    },
+    {
+      "title": "出席",
+      "instruction": "列出参会人",
+      "format": "list"
+    },
+    {
+      "title": "开始做",
+      "instruction": "下一迭代要开始的行动或试验",
+      "format": "list",
+      "item_format": "| **想法** | **提出人** |\n| --- | --- |"
+    },
+    {
+      "title": "停止做",
+      "instruction": "需要停止的做法",
+      "format": "list",
+      "item_format": "| **做法** | **原因** |\n| --- | --- |"
+    },
+    {
+      "title": "继续做",
+      "instruction": "需要继续保持的做法",
+      "format": "list",
+      "item_format": "| **做法** | **备注** |\n| --- | --- |"
+    },
+    {
+      "title": "行动项",
+      "instruction": "具体试验、负责人、成功指标",
+      "format": "list",
+      "item_format": "| **负责人** | **任务** | **截止日期** | **成功指标** |\n| --- | --- | --- | --- |"
+    },
+    {
+      "title": "备注与投票",
+      "instruction": "总结及得票最高的条目",
+      "format": "paragraph"
+    }
+  ]
+}

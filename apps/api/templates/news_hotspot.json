@@ -1,0 +1,34 @@
+{
+  "name": "新闻热点",
+  "description": "面向新闻和热点视频，提炼事件、事实、各方观点和后续影响。",
+  "sections": [
+    {
+      "title": "事件概述",
+      "instruction": "用两三句话说明这是什么新闻、何时何地、核心事件是什么。",
+      "format": "paragraph"
+    },
+    {
+      "title": "核心事实",
+      "instruction": "列出视频中明确提到的关键事实、数据、时间线和出处，不要推断未出现的信息。",
+      "format": "list",
+      "item_format": "- {fact}"
+    },
+    {
+      "title": "各方观点",
+      "instruction": "分别概括当事人、官方、媒体或评论中的主要立场。",
+      "format": "list",
+      "item_format": "| **来源** | **观点** |\n| --- | --- |"
+    },
+    {
+      "title": "争议与背景",
+      "instruction": "说明争议点、相关背景，以及视频里给出的原因或解释。",
+      "format": "paragraph"
+    },
+    {
+      "title": "影响与后续",
+      "instruction": "总结可能的影响、已公布的后续安排，以及观众需要持续关注的问题。",
+      "format": "list",
+      "item_format": "- {point}"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: media_platform
+      POSTGRES_USER: media
+      POSTGRES_PASSWORD: media
+    volumes: [media_pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U media -d media_platform"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  api:
+    build: {context: .., dockerfile: deploy/api.Dockerfile}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DATABASE_URL: postgresql+psycopg://media:media@postgres:5432/media_platform
+      MOSS_URL: http://host.docker.internal:9000
+      STORAGE_ROOT: /data
+      MOSS_MODEL_PATH: /models/moss/OpenMOSS-Team/MOSS-Transcribe-Diarize
+      SUMMARY_MODEL_PATH: /models/summary/Qwen3.5-4B-Q4_K_M.gguf
+    volumes:
+      - media_storage:/data
+      - "${HOME}/Library/Application Support/com.meetily.ai/funasr-models:/models/moss:ro"
+      - "${HOME}/Library/Application Support/com.meetily.ai/models/summary:/models/summary:ro"
+    ports: ["8000:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  moss:
+    profiles: ["docker-moss"]
+    build: {context: .., dockerfile: deploy/moss.Dockerfile}
+    environment:
+      MOSS_MODEL_PATH: /models/moss/OpenMOSS-Team/MOSS-Transcribe-Diarize
+      MOSS_PRELOAD: "1"
+    ports: ["9000:9000"]
+    volumes:
+      - "${HOME}/Library/Application Support/com.meetily.ai/funasr-models:/models/moss:ro"
+  web:
+    build: {context: ../apps/web, dockerfile: ../../deploy/web.Dockerfile}
+    environment: [NEXT_PUBLIC_API_URL=http://localhost:8000]
+    ports: ["3000:3000"]
+    depends_on: [api]
+volumes:
+  media_pg:
+  media_storage:

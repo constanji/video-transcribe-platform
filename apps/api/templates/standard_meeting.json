@@ -1,0 +1,27 @@
+{
+  "name": "标准会议纪要",
+  "description": "通用会议标准模板，聚焦关键结论与行动项。",
+  "sections": [
+    {
+      "title": "摘要",
+      "instruction": "用一段话概括整场会议的核心内容。",
+      "format": "paragraph"
+    },
+    {
+      "title": "关键决策",
+      "instruction": "列出会议中做出的最重要决策。",
+      "format": "list"
+    },
+    {
+      "title": "行动项",
+      "instruction": "列出所有待办任务，包含负责人、截止日期，并标注对应转写片段和时间戳。",
+      "format": "list",
+      "item_format": "| **负责人** | 任务 | 截止日期 | 对应转写片段 | 时间戳 |\n| --- | --- | --- | --- | --- |"
+    },
+    {
+      "title": "讨论要点",
+      "instruction": "概括主要讨论主题、关键论点和重要洞察。",
+      "format": "paragraph"
+    }
+  ]
+}

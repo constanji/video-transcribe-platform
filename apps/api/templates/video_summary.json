@@ -1,0 +1,22 @@
+{
+  "name": "通用视频总结",
+  "description": "面向短视频和长视频的通用摘要，提炼主题、要点和结论。",
+  "sections": [
+    {
+      "title": "主题",
+      "instruction": "用一两句话概括视频在讲什么。",
+      "format": "paragraph"
+    },
+    {
+      "title": "要点",
+      "instruction": "列出视频中的关键信息、论点和例子。",
+      "format": "list",
+      "item_format": "- {point}"
+    },
+    {
+      "title": "结论",
+      "instruction": "给出可执行结论或观众可以带走的判断。",
+      "format": "paragraph"
+    }
+  ]
+}
