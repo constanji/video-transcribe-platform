@@ -31,6 +31,14 @@ function isRunning(job?: Job | null) {
   return Boolean(job && !['completed', 'failed', 'cancelled'].includes(job.status));
 }
 
+function hasUsableTranscript(video: VideoAsset) {
+  return Boolean(video.transcripts?.some((item) => (item.text || '').trim()));
+}
+
+function hasUsableSummary(video: VideoAsset) {
+  return Boolean(video.summaries?.some((item) => (item.content_markdown || '').trim()));
+}
+
 function normalizePanel(panel?: 'download' | 'summary' | AnalyzePanel | null): CardPanel {
   if (panel === 'summary') return 'transcribe';
   return panel || null;
@@ -71,8 +79,8 @@ export default function ParsedVideoCard({
   useEffect(() => {
     setTranscribeJob(latestJob(video, 'transcribe'));
     setSummarizeJob(latestJob(video, 'summarize'));
-    setHasTranscript(Boolean(video.has_transcript));
-    setHasSummary(Boolean(video.has_summary));
+    setHasTranscript(hasUsableTranscript(video));
+    setHasSummary(hasUsableSummary(video));
   }, [video.id, video.last_processed_at, video.has_transcript, video.has_summary]);
 
   useEffect(() => {
@@ -95,8 +103,8 @@ export default function ParsedVideoCard({
           else setTranscribeJob(next);
           if (['completed', 'failed', 'cancelled'].includes(next.status)) {
             const fresh = await api<VideoAsset>(`/api/videos/${video.id}`);
-            setHasTranscript(Boolean(fresh.has_transcript || fresh.transcripts?.length));
-            setHasSummary(Boolean(fresh.has_summary || fresh.summaries?.length));
+            setHasTranscript(hasUsableTranscript(fresh));
+            setHasSummary(hasUsableSummary(fresh));
           }
         }));
       } catch {

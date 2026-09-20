@@ -7,6 +7,14 @@ import TemplateEditor from './TemplateEditor';
 import TemplatePicker from './TemplatePicker';
 import TranscriptStudio from './TranscriptStudio';
 
+function hasUsableTranscript(item: VideoAsset) {
+  return Boolean(item.transcripts?.some((value) => (value.text || '').trim()));
+}
+
+function hasUsableSummary(item: VideoAsset) {
+  return Boolean(item.summaries?.some((value) => (value.content_markdown || '').trim()));
+}
+
 export default function SummaryAction({
   videoId,
   resetKey,
@@ -75,8 +83,8 @@ export default function SummaryAction({
     }).catch(() => setMoss({ reachable: false }));
     if (videoId) {
       api<VideoAsset>(`/api/videos/${videoId}`).then((item) => {
-        setTranscriptReady(Boolean(item.has_transcript || item.transcripts?.length));
-        setSummaryDone(Boolean(item.has_summary || item.summaries?.length));
+        setTranscriptReady(hasUsableTranscript(item));
+        setSummaryDone(hasUsableSummary(item));
       }).catch(() => undefined);
     }
   }, [videoId]);
@@ -99,8 +107,8 @@ export default function SummaryAction({
         setJob(next);
         if (['completed', 'failed'].includes(next.status)) {
           const video = await api<VideoAsset>(`/api/videos/${videoId}`);
-          setTranscriptReady(Boolean(video.has_transcript || video.transcripts?.length));
-          setSummaryDone(Boolean(video.has_summary || video.summaries?.length || (next.job_type === 'summarize' && next.status === 'completed')));
+          setTranscriptReady(hasUsableTranscript(video));
+          setSummaryDone(Boolean(hasUsableSummary(video) || (next.job_type === 'summarize' && next.status === 'completed' && (video.summaries || []).some((value) => (value.content_markdown || '').trim()))));
         }
       } catch {
         window.clearInterval(timer);
