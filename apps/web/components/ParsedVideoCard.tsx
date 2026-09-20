@@ -164,11 +164,8 @@ export default function ParsedVideoCard({
   const currentJob = panel === 'summarize' ? summarizeJob : transcribeJob;
   const transcribeDone = Boolean(hasTranscript || transcribeJob?.status === 'completed');
   const summaryDone = Boolean(hasSummary || summarizeJob?.status === 'completed');
-  // The action in the log panel also serves as an explicit re-run entry point.
-  // Existing results remain available from the buttons on the left, so a
-  // completed result must not leave the selected log panel empty.
-  const transcribeStart = !transcribeRunning;
-  const summaryStart = !summarizeRunning;
+  const transcribeStart = !transcribeRunning && !transcribeDone;
+  const summaryStart = !summarizeRunning && !summaryDone;
   const blockedHint = transcribeRunning && panel === 'summarize'
     ? '转录进行中，完成后可开始总结'
     : summarizeRunning && panel === 'transcribe'

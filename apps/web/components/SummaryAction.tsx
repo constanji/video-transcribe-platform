@@ -187,7 +187,7 @@ export default function SummaryAction({
       <div className="summary-result-actions">
         <button
           type="button"
-          className={transcribeDone ? 'outline-button' : 'muted-button'}
+          className={transcribeDone ? 'primary-button' : 'muted-button'}
           onClick={() => transcribeDone && setStudio(true)}
           disabled={!transcribeDone}
         >
@@ -195,7 +195,7 @@ export default function SummaryAction({
         </button>
         <button
           type="button"
-          className={summaryDone ? 'outline-button' : 'muted-button'}
+          className={summaryDone ? 'primary-button' : 'muted-button'}
           onClick={() => summaryDone && setStudio(true)}
           disabled={!summaryDone}
         >
