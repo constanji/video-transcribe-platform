@@ -50,7 +50,7 @@ export default function SummaryProgress({
   const done = job?.status === 'completed';
   const running = Boolean(job && !failed && !done);
   const detail = job?.progress_detail;
-  const current = detail?.message || (logs.length ? logs[logs.length - 1].message : showStart ? `点击下方「${startLabel}」开始` : '选择左侧转录或总结');
+  const current = detail?.message || (logs.length ? logs[logs.length - 1].message : showStart ? `点击下方「${startLabel}」开始` : '选择上方「转录」或「总结」查看日志');
   const value = job ? percent(job) : 0;
   const meta = [
     detail?.audio_seconds ? `音频 ${durationLabel(detail.audio_seconds)}` : '',
@@ -86,7 +86,7 @@ export default function SummaryProgress({
             {startHint && <p>{startHint}</p>}
           </div>
         )}
-        {!showStart && !job && <p className="summary-log-empty">还没有日志。选择「转录」或「总结」后，在中间开始任务。</p>}
+        {!showStart && !job && <p className="summary-log-empty">还没有日志。选择上方「转录」或「总结」查看对应任务。</p>}
         {job && logs.length === 0 && !showStart && <p className="summary-log-empty">任务已创建，正在等待第一条日志…</p>}
         {logs.map((item, index) => (
           <div className={`summary-log-item ${item.level}`} key={`${item.at}-${index}`}>
