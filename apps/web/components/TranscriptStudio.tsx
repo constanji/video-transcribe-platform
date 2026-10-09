@@ -31,6 +31,7 @@ function clock(ms: number) {
 
 export default function TranscriptStudio({
   videoId,
+  meetingId,
   templateId,
   templateName,
   templates = [],
@@ -42,6 +43,8 @@ export default function TranscriptStudio({
   onTemplateChange,
 }: {
   videoId: string;
+  /** 传入会议 id 时面板会出现「重新转录」按钮，用已保存的录音重跑终稿转录。 */
+  meetingId?: string;
   templateId: string;
   templateName?: string;
   templates?: Template[];
@@ -55,6 +58,7 @@ export default function TranscriptStudio({
   const [video, setVideo] = useState<VideoAsset | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [settings, setSettings] = useState<SummarySettings | null>(null);
   const [savingModel, setSavingModel] = useState(false);
   const [activeTemplateId, setActiveTemplateId] = useState(templateId);
@@ -276,7 +280,28 @@ export default function TranscriptStudio({
     }
   }
 
+  // 会议场景专属：录音文件已落盘（meeting.audio_path），失败/中断后不必重录，
+  // 直接重跑终稿转录。job 挂上去后由上方现有轮询接管，完成后自动 load() 刷新转录。
+  async function retryTranscribe() {
+    if (!meetingId || retrying) return;
+    setRetrying(true);
+    try {
+      const payload = await api<{ job?: Job }>(`/api/v1/meetings/${meetingId}/retry-transcribe`, { method: 'POST' });
+      if (payload.job) {
+        setJob(payload.job);
+        onJobChange?.(payload.job);
+      }
+      onToast('已重新开始终稿转录');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setRetrying(false);
+    }
+  }
+
   const generating = Boolean(job && !['completed', 'failed', 'cancelled'].includes(job.status));
+  const transcribeRunning = generating && job?.job_type === 'transcribe';
+  const failedTranscribe = job?.status === 'failed' && job?.job_type === 'transcribe';
   const failed = job?.status === 'failed';
   const progress = Math.max(0, Math.min(100, Math.round((job?.progress || 0) * 100)));
   const dialog = (
@@ -318,9 +343,22 @@ export default function TranscriptStudio({
                   </div>
                 </details>
               </div>
+              {/* 会议录音已落盘，转录失败/中断后可在这里直接重跑，不必回工作台重录。 */}
+              {meetingId && (
+                <button
+                  type="button"
+                  className="studio-tool"
+                  data-tip="用已保存的录音重跑终稿转录"
+                  onClick={retryTranscribe}
+                  disabled={retrying || generating}
+                >
+                  <Icon d="M12 5V1L7 6l5 5V7a5 5 0 11-5 5H5a7 7 0 107-7z" />
+                  {retrying ? '正在启动…' : transcribeRunning ? '转录中…' : '重新转录'}
+                </button>
+              )}
             </div>
           <div className="studio-turns">
-            {!transcript && <p className="studio-empty-text">还没有转录结果。</p>}
+            {!transcript && <p className="studio-empty-text">{transcribeRunning ? '正在重新转录，完成后文字会出现在这里。' : '还没有转录结果。'}</p>}
             {turns.map((item, index) => (
               <article className="studio-turn" key={`${item.text}-${index}`}>
                 <time>[{clock(segmentStart(item))}]</time>
@@ -389,17 +427,19 @@ export default function TranscriptStudio({
             {generating ? (
               <div className="studio-empty studio-processing">
                 <span className="studio-spinner" />
-                <h3>正在生成摘要</h3>
-                <p>{job?.progress_detail?.message || '模型正在读取转录内容，请稍候。'}</p>
+                <h3>{transcribeRunning ? '正在重新转录' : '正在生成摘要'}</h3>
+                <p>{job?.progress_detail?.message || (transcribeRunning ? '模型正在听录音，请稍候。' : '模型正在读取转录内容，请稍候。')}</p>
                 <div className="studio-progress"><i style={{ width: `${Math.max(progress, 8)}%` }} /></div>
                 <small>{progress}%</small>
               </div>
             ) : failed ? (
               <div className="studio-empty studio-failed">
                 <span className="studio-empty-icon">!</span>
-                <h3>摘要生成失败</h3>
-                <p>{job?.error_message || '生成摘要时发生错误，请重试。'}</p>
-                <button type="button" className="primary-button" onClick={generate}>重新生成摘要</button>
+                <h3>{failedTranscribe ? '重新转录失败' : '摘要生成失败'}</h3>
+                <p>{job?.error_message || (failedTranscribe ? '可以再次尝试重新转录。' : '生成摘要时发生错误，请重试。')}</p>
+                <button type="button" className="primary-button" onClick={failedTranscribe ? retryTranscribe : generate}>
+                  {failedTranscribe ? '重新转录' : '重新生成摘要'}
+                </button>
               </div>
             ) : summaryText ? (
             <article

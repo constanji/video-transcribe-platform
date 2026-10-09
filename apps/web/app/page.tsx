@@ -19,6 +19,7 @@ export default function MeetingHomePage() {
   const [templateId, setTemplateId] = useState('');
   const [summaryReady, setSummaryReady] = useState(true);
   const [studioVideoId, setStudioVideoId] = useState<string | null>(null);
+  const [studioMeetingId, setStudioMeetingId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; kind?: 'success' | 'error' }>({ message: '' });
 
   useEffect(() => {
@@ -73,17 +74,24 @@ export default function MeetingHomePage() {
       <MeetingWorkbench platforms={platforms} onToast={(message, kind) => setToast({ message, kind })} />
       <RecentMeetingGrid
         meetings={meetings}
-        onOpen={(item) => setStudioVideoId(item.video_id || null)}
+        onOpen={(item) => {
+          setStudioVideoId(item.video_id || null);
+          setStudioMeetingId(item.id);
+        }}
       />
       {studioVideoId && (
         <TranscriptStudio
           videoId={studioVideoId}
+          meetingId={studioMeetingId || undefined}
           templateId={templateId}
           templateName={templates.find((item) => item.id === templateId)?.name}
           templates={templates}
           onTemplateChange={setTemplateId}
           summaryReady={summaryReady}
-          onClose={() => setStudioVideoId(null)}
+          onClose={() => {
+            setStudioVideoId(null);
+            setStudioMeetingId(null);
+          }}
           onToast={(message, kind) => setToast({ message, kind })}
         />
       )}
