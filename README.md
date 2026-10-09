@@ -1,12 +1,13 @@
 # 视频解析与转录总结平台
 
-一个面向单管理员、自部署场景的视频工作台。输入视频链接后，可以查看解析出的媒体信息，下载视频，调用 MOSS/FunASR 完成转录，并使用本地小模型生成总结。
+一个面向单管理员、自部署场景的视频工作台。输入视频链接或上传本地音视频后，可以查看媒体信息，下载视频，调用 MOSS/FunASR 完成转录，并使用本地小模型生成总结。
 
 当前项目包含 FastAPI API、Next.js 工作台、PostgreSQL 数据库，以及可独立运行的 MOSS 转录服务。未配置真实解析器、转录模型或总结模型时，系统会显示明确的未配置状态，不会伪造结果。
 
 ## 功能概览
 
 - 解析视频链接并保存标题、作者、封面和媒体版本
+- 上传本地 MP3、WAV、M4A、MP4、WebM、MOV 文件并复用现有转录与历史工作流（最大 500MB）
 - 支持视频下载和历史记录查看
 - 通过 MOSS/FunASR 进行异步转录，支持进度日志和说话人信息
 - 根据转录结果生成 Markdown 总结
@@ -36,15 +37,9 @@ docker compose -f deploy/docker-compose.yml up --build
 | Web 工作台 | http://localhost:3000 |
 | API 文档 | http://localhost:8000/docs |
 | API 健康检查 | http://localhost:8000/api/system/health |
-| MOSS 服务 | http://localhost:9000/health |
+| MOSS 服务 | http://localhost:9001/health |
 
-Compose 默认让 API 通过 `host.docker.internal:9000` 访问宿主机上的 MOSS 服务。也可以启用 MOSS 容器：
-
-```bash
-docker compose --profile docker-moss -f deploy/docker-compose.yml up --build
-```
-
-模型挂载路径默认面向本机 Meetily 安装目录。Linux 或其他目录布局需要按实际路径修改 `deploy/docker-compose.yml`。
+Compose 默认启动 Web、API、PostgreSQL 和 MOSS 四个本机容器，API 与 MOSS 共用受管媒体卷以处理上传文件。模型挂载路径默认面向本机 Meetily 安装目录；Linux 或其他目录布局需要按实际路径修改 `deploy/docker-compose.yml`。
 
 停止服务：
 
@@ -122,6 +117,7 @@ curl http://127.0.0.1:9000/health
 | `ADMIN_USERNAME` | `admin` | 管理员用户名 |
 | `ADMIN_PASSWORD` | `change-me` | 管理员密码，部署前应修改 |
 | `API_SECRET` | `change-me` | API 签名密钥，部署前应修改 |
+| `COOKIE_ENCRYPTION_KEY` | 空（回退使用 `API_SECRET`） | 视频号 Cookie 加密密钥，生产环境应设置为独立的高强度随机值 |
 | `MOSS_URL` | `http://localhost:9000` | MOSS 服务地址 |
 | `MOSS_PRELOAD` | `1` | 是否启动后预热模型 |
 | `STORAGE_ROOT` | `./storage` | 下载媒体和中间文件目录 |
@@ -150,6 +146,7 @@ pyproject.toml            Python API 依赖
 启动 API 后可访问 Swagger：`http://localhost:8000/docs`。
 
 - `POST /api/parse`：解析视频链接
+- `POST /api/uploads`：流式上传并校验本地音视频，按 SHA-256 复用重复资产
 - `GET /api/videos`、`GET /api/videos/recent`：视频和最近记录
 - `POST /api/videos/{video_id}/transcribe`：创建转录任务
 - `POST /api/videos/{video_id}/summary`：创建转录并总结任务
@@ -171,7 +168,7 @@ npm run build
 
 ```bash
 curl http://localhost:8000/api/system/health
-curl http://localhost:9000/health
+curl http://localhost:9001/health
 ```
 
 ## 当前边界
