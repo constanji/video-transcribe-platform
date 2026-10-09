@@ -116,7 +116,8 @@ def cmd_probe(cli, args):
 
 
 def cmd_exec(cli, args):
-    run(cli, args.cmd, timeout=args.timeout)
+    code, _, _ = run(cli, args.cmd, timeout=args.timeout, quiet=args.quiet)
+    return code
 
 
 def _progress(name, done, total, start):
@@ -225,6 +226,8 @@ def main():
     p = sub.add_parser("exec")
     p.add_argument("cmd")
     p.add_argument("--timeout", type=int, default=300)
+    p.add_argument("-q", "--quiet", action="store_true",
+                   help="do not echo the command or 'exit N'; only remote stdout is printed")
 
     p = sub.add_parser("put")
     p.add_argument("local")
@@ -256,8 +259,9 @@ def main():
     HOST, USER, PASSWORD, PORT = args.host, args.user, args.password, args.port
 
     cli = connect()
+    code = 0
     try:
-        {
+        code = {
             "probe": cmd_probe,
             "exec": cmd_exec,
             "put": cmd_put,
@@ -266,9 +270,10 @@ def main():
             "ps": cmd_ps,
             "logs": cmd_logs,
             "mkdir": cmd_mkdir,
-        }[args.action](cli, args)
+        }[args.action](cli, args) or 0
     finally:
         cli.close()
+    sys.exit(code)
 
 
 if __name__ == "__main__":

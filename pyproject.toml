@@ -14,3 +14,9 @@ dependencies = [
   "python-jose[cryptography]>=3.3",
   "cryptography>=43.0",
 ]
+
+# Optional: only needed by the deployment helper that drives releases over SSH.
+# On this flat layout `pip install .[deploy]` cannot run (see deployment-assets/README.md);
+# install it directly with `pip install paramiko`.
+[project.optional-dependencies]
+deploy = ["paramiko>=3.4"]
