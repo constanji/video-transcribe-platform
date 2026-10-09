@@ -34,6 +34,17 @@ SUMMARY_MODEL_PATH = Path(os.getenv(
     str(Path.home() / "Library/Application Support/com.meetily.ai/models/summary/Qwen3.5-4B-Q4_K_M.gguf"),
 ))
 LLAMA_CLI = os.getenv("LLAMA_CLI", "llama-cli")
+
+
+def _llama_cli_available() -> bool:
+    """总结用的 llama-cli 是否可执行。
+
+    既接受绝对路径（镜像里是 /usr/local/bin/llama-cli），也接受 PATH 里能找到的
+    命令名，这样本机直接跑服务时不用非得设 LLAMA_CLI。
+    """
+    return bool(Path(LLAMA_CLI).is_file() or shutil.which(LLAMA_CLI))
+
+
 jobs: dict[str, dict[str, Any]] = {}
 _model = None
 _device_cache: str | None = None
@@ -933,6 +944,16 @@ def health():
         "funasr_available": available,
         "funasr_error": None if available else _funasr_error,
         "chunk": {"enabled": _chunk_workers() > 1, "seconds": _chunk_seconds(), "workers": _chunk_workers()},
+        # 本地总结实际是「本服务用 llama-cli 加载 GGUF」跑出来的，所以只有本服务
+        # 知道它到底能不能用（API 进程可能跑在宿主机上，看不到容器内的 /models）。
+        # 一并上报，平台侧就能直接给出准确结论，不必再靠猜路径。
+        "summary_model": SUMMARY_MODEL_PATH.name,
+        "summary_model_path": str(SUMMARY_MODEL_PATH),
+        "summary_model_found": SUMMARY_MODEL_PATH.is_file(),
+        "summary_engine": "llama-cli" if _llama_cli_available() else None,
+        "summary_cli": LLAMA_CLI,
+        "summary_cli_found": _llama_cli_available(),
+        "summary_ready": SUMMARY_MODEL_PATH.is_file() and _llama_cli_available(),
     }
 
 
@@ -1042,9 +1063,9 @@ def summarize(request: SummaryRequest):
         raise HTTPException(400, "转写文本为空")
     if not SUMMARY_MODEL_PATH.is_file():
         raise HTTPException(503, f"未找到总结模型文件：{SUMMARY_MODEL_PATH}")
-    binary = LLAMA_CLI if Path(LLAMA_CLI).is_file() else (shutil.which(LLAMA_CLI) or "")
-    if not binary:
+    if not _llama_cli_available():
         raise HTTPException(503, f"未找到 llama-cli：{LLAMA_CLI}")
+    binary = str(LLAMA_CLI) if Path(LLAMA_CLI).is_file() else (shutil.which(LLAMA_CLI) or LLAMA_CLI)
     prompt_file = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
     prompt_file.write(_summary_prompt(request))
     prompt_file.close()

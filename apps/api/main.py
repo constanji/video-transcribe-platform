@@ -657,8 +657,21 @@ def health():
         "moss_status": moss.get("status"),
         "moss_warmup_error": moss.get("warmup_error"),
         "moss_health": moss,
+        "summary_model": transcription["summary_model"],
         "summary_model_path": transcription["summary_model_path"],
-        "summary_model_found": transcription["summary_model_found"],
+        # 与 moss_model_found 同理：本地总结其实是 MOSS 用 llama-cli 跑的，真正知道
+        # 「能不能用」的只有 MOSS。API 进程（尤其跑在宿主机时）看到的路径未必和容器
+        # 内一致，所以 MOSS 可达且上报了该字段时以它为准；没上报（老版本）才退回
+        # 本地路径检查，避免把「查不到」误报成「不可用」。
+        "summary_model_found": bool(
+            moss.get("summary_model_found")
+            if moss.get("reachable") and moss.get("summary_model_found") is not None
+            else transcription["summary_model_found"]
+        ),
+        "summary_ready": moss.get("summary_ready"),
+        "summary_engine": moss.get("summary_engine"),
+        "summary_cli": moss.get("summary_cli"),
+        "summary_cli_found": moss.get("summary_cli_found"),
         "default_language": "zh",
     }
 
