@@ -23,7 +23,9 @@ services:
       MOSS_MODEL_PATH: /models/moss/OpenMOSS-Team/MOSS-Transcribe-Diarize
       SUMMARY_MODEL_PATH: /models/summary/Qwen3.5-4B-Q4_K_M.gguf
     volumes:
-      - media_storage:/data
+      # 本地开发常见组合是「api 跑在宿主机 + moss 跑在容器」，所以统一绑宿主
+      # storage/ 目录，两边看到的才是同一份音频（用命名卷会各看各的）。
+      - ../storage:/data
       # 仓库内自带的模型目录同时提供 moss 与 summary 两个模型：
       #   <ASSET_ROOT>/moss/OpenMOSS-Team/MOSS-Transcribe-Diarize
       #   <ASSET_ROOT>/summary/Qwen3.5-4B-Q4_K_M.gguf
@@ -36,6 +38,7 @@ services:
         condition: service_started
   moss:
     build: {context: .., dockerfile: deploy/moss.Dockerfile}
+    container_name: moss-transcribe
     environment:
       MOSS_MODEL_PATH: /models/moss/OpenMOSS-Team/MOSS-Transcribe-Diarize
       # 本地总结由本服务用 llama-cli 加载这个 GGUF 完成，所以这两个变量必须给到
@@ -43,10 +46,11 @@ services:
       SUMMARY_MODEL_PATH: /models/summary/Qwen3.5-4B-Q4_K_M.gguf
       LLAMA_CLI: /usr/local/bin/llama-cli
       MOSS_PRELOAD: "1"
-    ports: ["127.0.0.1:9001:9000"]
+    # 只绑回环，与服务器部署保持同一套隔离约定（api 在宿主机/同网络内访问）。
+    ports: ["127.0.0.1:${MOSS_PORT:-9000}:9000"]
     volumes:
       - "${ASSET_ROOT:-../deployment-assets/models}:/models:ro"
-      - media_storage:/data:ro
+      - ../storage:/data:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=3)"]
       interval: 10s
@@ -59,4 +63,3 @@ services:
     depends_on: [api]
 volumes:
   media_pg:
-  media_storage:

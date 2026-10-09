@@ -7,6 +7,8 @@
 *.db
 *.db-*
 storage/
+# 临时调试产物（CDP 脚本、探针 JSON、截图、chrome profile 等）
+.tmp/
 
 # ---- Python ----
 __pycache__/
