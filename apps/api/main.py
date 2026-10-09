@@ -390,7 +390,7 @@ def video_dict(v: VideoAsset, session: Session | None = None) -> dict[str, Any]:
             if v.thumbnail_path and Path(v.thumbnail_path).exists()
             else v.thumbnail_url
         ),
-        "thumbnail_path": v.thumbnail_path,
+        # thumbnail_path（服务器文件系统绝对路径）不对外暴露；封面统一走上面的代理路由。
         "duration_seconds": v.duration_seconds,
         "parse_status": v.parse_status,
         "available_formats": v.available_formats or [],
