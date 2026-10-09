@@ -485,6 +485,8 @@ def list_meetings(request: Request, session: Session = Depends(get_db), _auth=De
                 "status": meeting.status,
                 "mode": meeting.mode,
                 "language": meeting.language,
+                # 会议的结果面板（转录+纪要工作室）直接读 video asset，列表带上 id 免得逐个回查。
+                "video_id": meeting.video_asset_id,
                 "duration_seconds": duration,
                 "has_transcript": has_transcript,
                 "has_summary": has_summary,

@@ -32,7 +32,20 @@ function timeLabel(value?: string | null) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
-export default function RecentMeetingGrid({ meetings }: { meetings: MeetingHistoryItem[] }) {
+export default function RecentMeetingGrid({
+  meetings,
+  onOpen,
+}: {
+  meetings: MeetingHistoryItem[];
+  onOpen?: (item: MeetingHistoryItem) => void;
+}) {
+  // 有 video_id 的会议直接打开结果面板（转录+纪要工作室）；
+  // 老数据没有绑定视频资产时，降级跳历史页的会议详情。
+  function open(item: MeetingHistoryItem) {
+    if (item.video_id && onOpen) onOpen(item);
+    else window.location.href = `/history?tab=meeting&meeting=${item.id}`;
+  }
+
   return (
     <section className="library-panel recent-panel">
       <div className="section-title">
@@ -54,7 +67,19 @@ export default function RecentMeetingGrid({ meetings }: { meetings: MeetingHisto
                 className="recent-card meeting-recent-card"
                 key={item.id}
                 href={`/history?tab=meeting&meeting=${item.id}`}
-                aria-label={`查看会议「${item.title}」的纪要详情`}
+                onClick={(event) => {
+                  if (item.video_id && onOpen) {
+                    event.preventDefault();
+                    open(item);
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if ((event.key === 'Enter' || event.key === ' ') && item.video_id && onOpen) {
+                    event.preventDefault();
+                    open(item);
+                  }
+                }}
+                aria-label={`打开会议「${item.title}」的结果面板`}
               >
                 <div className="recent-cover meeting-cover">
                   <span>◉</span>

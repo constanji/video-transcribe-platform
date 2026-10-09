@@ -124,6 +124,8 @@ export type MeetingHistoryItem = {
   status: string;
   mode: 'live' | 'recording';
   language: string;
+  // 会议绑定的视频资产：结果面板（转录+纪要工作室）按它加载数据。
+  video_id?: string | null;
   duration_seconds?: number | null;
   has_transcript: boolean;
   has_summary: boolean;
