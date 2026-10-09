@@ -148,33 +148,38 @@ export default function TranscriptStudio({
   // 内置本地模型由 MOSS 用 llama-cli 加载 summary_model_path 指向的 GGUF 完成，
   // 所以可用性跟着 summary_model_found（该文件是否存在）走；远程 provider 则需要
   // 配了 api_base_url 才算可用，否则必然失败。
+  // 设置还在请求中时 settings 为 null。这段时间不能把「还没读到」当成「未配置」，
+  // 否则面板一打开会先闪一下「未配置总结模型」，看起来像模型没配好。父组件通常先
+  // 挂载、先拿到配置，所以加载期间先沿用它的结论，措辞也改成中性的「正在读取」。
+  const settingsLoading = settings === null;
   const provider = settings?.default_provider || 'local';
   const modelName = settings?.summary_model || '';
   const hasRemoteBase = Boolean(settings?.api_base_url);
   const localUsable = Boolean(settings?.summary_model_found);
-  const modelReady = settings
-    ? provider === 'local'
-      ? localUsable
-      : hasRemoteBase
-    : summaryReady;
+  const modelReady = settingsLoading ? summaryReady : (provider === 'local' ? localUsable : hasRemoteBase);
+  const modelUnavailableTip = settingsLoading
+    ? '正在读取模型配置…'
+    : provider === 'local'
+      ? `本地总结不可用：找不到 ${settings?.summary_model_path || '总结模型文件'}`
+      : '远程总结不可用：请先在设置里填写 API Base URL';
   const modelOptions = [
     {
       value: 'local',
       label: modelName ? `内置本地模型 · ${modelName}` : '内置本地模型',
       usable: localUsable,
-      hint: localUsable ? undefined : '缺少 GGUF 模型文件',
+      hint: settingsLoading ? '正在读取配置…' : localUsable ? undefined : '缺少 GGUF 模型文件',
     },
     {
       value: 'ollama',
       label: modelName ? `Ollama · ${modelName}` : 'Ollama',
       usable: hasRemoteBase,
-      hint: hasRemoteBase ? undefined : '未配置接口地址',
+      hint: settingsLoading ? '正在读取配置…' : hasRemoteBase ? undefined : '未配置接口地址',
     },
     {
       value: 'openai',
       label: modelName ? `OpenAI 兼容 API · ${modelName}` : 'OpenAI 兼容 API',
       usable: hasRemoteBase,
-      hint: hasRemoteBase ? undefined : '未配置接口地址',
+      hint: settingsLoading ? '正在读取配置…' : hasRemoteBase ? undefined : '未配置接口地址',
     },
   ];
 
@@ -272,7 +277,7 @@ export default function TranscriptStudio({
               <button
                 type="button"
                 className={modelReady ? 'studio-tool active' : 'studio-tool muted-button'}
-                data-tip={modelReady ? undefined : '未配置总结模型'}
+                data-tip={settingsLoading || modelReady ? undefined : '未配置总结模型'}
                 onClick={generate}
                 disabled={busy || generating || !transcript}
               >
@@ -291,12 +296,8 @@ export default function TranscriptStudio({
                 icon="M12 2a4 4 0 014 4v1h1a3 3 0 013 3v2h-2v5a3 3 0 01-3 3H9a3 3 0 01-3-3v-5H4V10a3 3 0 013-3h1V6a4 4 0 014-4zm-1 14v3h2v-3h-2zm0-8v6h2V8h-2z"
                 value={provider}
                 ariaLabel="总结模型"
-                title={modelReady
-                  ? '选择总结模型'
-                  : provider === 'local'
-                    ? `本地总结不可用：找不到 ${settings?.summary_model_path || '总结模型文件'}`
-                    : '远程总结不可用：请先在设置里填写 API Base URL'}
-                muted={!modelReady}
+                title={modelReady ? '选择总结模型' : modelUnavailableTip}
+                muted={!settingsLoading && !modelReady}
                 disabled={!settings || savingModel}
                 placeholder="总结模型"
                 maxWidth={190}

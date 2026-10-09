@@ -55,10 +55,12 @@ export default function SummaryAction({
   const [studio, setStudio] = useState(false);
   const [transcriptReady, setTranscriptReady] = useState(hasTranscript);
   const [summaryDone, setSummaryDone] = useState(hasSummary);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [moss, setMoss] = useState<{ loaded?: boolean; loading?: boolean; reachable?: boolean }>({});
 
   // 内置本地模型由 MOSS 用 llama-cli 加载 summary_model_path 指向的 GGUF 做总结，
   // 所以本机有没有那个文件直接决定本地总结是否可用；远程 provider 必须配 api_base_url。
+  // 设置拉回来之前不要下「未配置」的结论——那时只是还不知道，不是没配置。
   const summaryReady = settings.default_provider === 'local'
     ? Boolean(settings.summary_model_found)
     : Boolean(settings.api_base_url);
@@ -84,7 +86,7 @@ export default function SummaryAction({
     }).catch(() => setTemplates([]));
     api<any>('/api/settings/transcription').then((value) => {
       setSettings(value);
-    }).catch(() => setSettings({}));
+    }).catch(() => setSettings({})).finally(() => setSettingsLoaded(true));
     api<any>('/api/system/health').then((health) => {
       setMoss({
         reachable: Boolean(health.moss_reachable),
@@ -197,7 +199,7 @@ export default function SummaryAction({
           <button
             type="button"
             className={summaryReady ? 'primary-button' : 'muted-button'}
-            data-tip={summaryReady ? undefined : '未配置总结模型'}
+            data-tip={settingsLoaded && !summaryReady ? '未配置总结模型' : undefined}
             onClick={() => start('summary')}
             disabled={busy || running}
           >
@@ -229,7 +231,7 @@ export default function SummaryAction({
       {moss.reachable !== false && moss.loading && !moss.loaded && (
         <p className="inline-warning">模型加载中，就绪后再开始可避免第一次等待。</p>
       )}
-      {!summaryReady && showLaunch && <p className="inline-warning">总结模型未配置，点击灰色按钮可去设置。</p>}
+      {settingsLoaded && !summaryReady && showLaunch && <p className="inline-warning">总结模型未配置，点击灰色按钮可去设置。</p>}
       <TemplateEditor
         open={editing}
         title="增加模板"

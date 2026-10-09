@@ -139,7 +139,7 @@ export default function TranscriptionSettings({
         <input value={data.summary_model || ''} onChange={(e) => patch({ summary_model: e.target.value })} />
       </label>
       <label className="setting-row">
-        <span><strong>总结模型路径</strong><small>MOSS 用 llama-cli 加载该 GGUF，路径必须是 MOSS 进程/容器内可见的路径</small></span>
+        <span><strong>总结模型路径</strong><small>MOSS 用 llama-cli 加载该 GGUF；API 与 MOSS 进程都要能读到这个文件（Docker 部署下两者同挂 /models）</small></span>
         <input value={data.summary_model_path || ''} onChange={(e) => patch({ summary_model_path: e.target.value })} />
       </label>
       <label className="setting-row"><span><strong>API Base URL</strong></span><input value={data.api_base_url || ''} onChange={(e) => patch({ api_base_url: e.target.value })} /></label>
