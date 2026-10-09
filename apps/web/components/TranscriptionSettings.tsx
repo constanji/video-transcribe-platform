@@ -135,11 +135,11 @@ export default function TranscriptionSettings({
         </select>
       </label>
       <label className="setting-row">
-        <span><strong>总结小模型</strong><small>{data.summary_model_found ? '已找到 Qwen3.5-4B-Q4_K_M，可直接使用' : '未找到 GGUF 文件'}</small></span>
+        <span><strong>总结小模型</strong><small>{data.summary_model_found ? '已找到模型文件，本地总结可直接使用' : '未找到 GGUF 模型文件，本地总结不可用；可改用下方远程 Provider'}</small></span>
         <input value={data.summary_model || ''} onChange={(e) => patch({ summary_model: e.target.value })} />
       </label>
       <label className="setting-row">
-        <span><strong>总结模型路径</strong></span>
+        <span><strong>总结模型路径</strong><small>MOSS 用 llama-cli 加载该 GGUF，路径必须是 MOSS 进程/容器内可见的路径</small></span>
         <input value={data.summary_model_path || ''} onChange={(e) => patch({ summary_model_path: e.target.value })} />
       </label>
       <label className="setting-row"><span><strong>API Base URL</strong></span><input value={data.api_base_url || ''} onChange={(e) => patch({ api_base_url: e.target.value })} /></label>

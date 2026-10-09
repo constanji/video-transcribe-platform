@@ -1570,10 +1570,17 @@ def execute_summary_job(job_id: str, template_id: str | None, language: str, reu
 
 
 def _summary_ready(settings: dict[str, Any]) -> bool:
+    """总结任务的前置检查。
+
+    本地总结由 MOSS 的 /v1/summaries 用 llama-cli 加载 summary_model_path 指向的
+    GGUF 完成，所以「内置本地模型」是否可用取决于那个文件在不在；远程 provider
+    则必须有 api_base_url，否则 _chat_summary 里必然抛「未配置 API Base URL」，
+    这里提前拦住，避免创建一个注定失败的任务。
+    """
     provider = str(settings.get("default_provider") or "local")
     if provider == "local":
         return bool(settings.get("summary_model_found"))
-    return bool(settings.get("api_base_url") or provider)
+    return bool(settings.get("api_base_url"))
 
 
 @app.post("/api/videos/{video_id}/summary")

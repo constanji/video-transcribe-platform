@@ -112,10 +112,32 @@
 .studio-tool+.studio-tool{margin-left:-1px}
 .studio-tool.active{border-color:#bcd6f5;background:#f1f7ff;color:#186dc8;z-index:1}
 .studio-tool:disabled{cursor:not-allowed;opacity:.65}
-.studio-tool-select{padding-right:12px}
-.studio-tool-select select{border:0;background:transparent;font:inherit;font-size:14px;color:inherit;outline:0;cursor:pointer;max-width:200px}
-.studio-tool-select select:disabled{cursor:not-allowed}
+.studio-tool-select{position:relative;padding-right:12px}
 .studio-tool-select.muted-select{color:var(--muted)}
+.studio-tool-select.is-disabled{opacity:.65}
+.studio-select-icon{width:18px;height:18px;flex:none}
+.studio-select-trigger{display:inline-flex;align-items:center;gap:6px;min-width:0;border:0;padding:0;background:transparent;font:inherit;font-size:14px;color:inherit;cursor:pointer}
+.studio-select-trigger:disabled{cursor:not-allowed}
+.studio-select-value{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px}
+.studio-select-caret{width:14px;height:14px;flex:none;opacity:.55;transition:transform .16s ease}
+.studio-tool-select.is-open{z-index:30;border-color:#bcd6f5}
+.studio-tool-select.is-open .studio-select-caret{transform:rotate(180deg)}
+/* 弹层由原生 select 交给系统绘制，样式跟不了应用；这里换成自绘列表 */
+.studio-select-menu{position:absolute;top:calc(100% + 8px);left:0;z-index:40;min-width:100%;max-width:320px;max-height:288px;overflow:auto;padding:6px;border:1px solid var(--line);border-radius:10px;background:#fff;box-shadow:0 12px 32px rgba(22,32,48,.16)}
+.studio-select-menu.is-right{left:auto;right:0}
+.studio-select-menu button{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;border:0;border-radius:7px;background:transparent;padding:9px 10px;font:inherit;font-size:13px;color:#39485d;text-align:left;cursor:pointer}
+.studio-select-menu button:hover:not(:disabled){background:#f2f6fb}
+.studio-select-menu button:disabled{color:#aab2be;cursor:not-allowed}
+.studio-select-menu button.is-selected{color:#186dc8;background:#f1f7ff}
+.studio-select-menu button.is-selected:hover{background:#e9f2fe}
+.studio-select-menu button.is-selected:disabled{color:#6b7686;background:#f4f6f9}
+.studio-select-menu button.is-selected:disabled .studio-select-check{opacity:.5}
+.studio-select-option{display:flex;flex-direction:column;gap:2px;min-width:0}
+.studio-select-option-label{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.studio-select-option small{font-size:11px;color:#98a1ae}
+.studio-select-menu button.is-selected .studio-select-option small{color:#6c9bd2}
+.studio-select-check{width:14px;height:14px;flex:none}
+.studio-select-empty{margin:0;padding:10px;font-size:13px;color:var(--muted)}
 .studio-turns,.studio-summary{flex:1;overflow:auto;padding:8px 0 24px}
 .studio-turn{display:grid;grid-template-columns:58px minmax(0,1fr);gap:10px;padding:11px 18px;align-items:start}
 .studio-turn time{font-size:12px;color:#9aa3af;font-variant-numeric:tabular-nums;padding-top:3px}

@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { api } from '../lib/api';
 import type { Job, Summary, SummarySettings, Template, Transcript, VideoAsset } from '../lib/types';
 import { cleanSummaryMarkdown } from '../lib/summary-text';
+import StudioSelect from './StudioSelect';
 
 function Icon({ d, label }: { d: string; label?: string }) {
   return (
@@ -143,29 +144,37 @@ export default function TranscriptStudio({
   // The model picker mirrors the provider list from the settings page, but the
   // choice is written straight through so a summary can be re-run without
   // leaving the dialog. `summary_model` is the model name for local and remote.
+  //
+  // 内置本地模型由 MOSS 用 llama-cli 加载 summary_model_path 指向的 GGUF 完成，
+  // 所以可用性跟着 summary_model_found（该文件是否存在）走；远程 provider 则需要
+  // 配了 api_base_url 才算可用，否则必然失败。
   const provider = settings?.default_provider || 'local';
   const modelName = settings?.summary_model || '';
   const hasRemoteBase = Boolean(settings?.api_base_url);
+  const localUsable = Boolean(settings?.summary_model_found);
   const modelReady = settings
     ? provider === 'local'
-      ? Boolean(settings.summary_model_found)
+      ? localUsable
       : hasRemoteBase
     : summaryReady;
   const modelOptions = [
     {
       value: 'local',
       label: modelName ? `内置本地模型 · ${modelName}` : '内置本地模型',
-      usable: Boolean(settings?.summary_model_found),
+      usable: localUsable,
+      hint: localUsable ? undefined : '缺少 GGUF 模型文件',
     },
     {
       value: 'ollama',
       label: modelName ? `Ollama · ${modelName}` : 'Ollama',
       usable: hasRemoteBase,
+      hint: hasRemoteBase ? undefined : '未配置接口地址',
     },
     {
       value: 'openai',
       label: modelName ? `OpenAI 兼容 API · ${modelName}` : 'OpenAI 兼容 API',
       usable: hasRemoteBase,
+      hint: hasRemoteBase ? undefined : '未配置接口地址',
     },
   ];
 
@@ -270,47 +279,51 @@ export default function TranscriptStudio({
                 <Icon d="M12 2l1.6 4.4L18 8l-4.4 1.6L12 14l-1.6-4.4L6 8l4.4-1.6L12 2zm7 9l.9 2.6L23 15l-3.1.9L19 19l-.9-3.1L15 15l3.1-.9L19 11zM5 14l.8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8L5 14z" />
                 {generating ? '生成中…' : summaryText ? '重新生成摘要' : '生成摘要'}
               </button>
-              <label className="studio-tool studio-tool-select">
-                <Icon d="M12.9 15h-1.8L9.6 11.4 8 15H6.2l2.8-7h1.6l2.3 7zM4 4h16v2H4V4zm2 14h12v2H6v-2z" />
-                <select defaultValue="zh-CN" aria-label="摘要语言">
-                  <option value="zh-CN">简体中文</option>
-                </select>
-              </label>
-              <label
-                className={`studio-tool studio-tool-select${modelReady ? '' : ' muted-select'}`}
-                title={modelReady ? '选择总结模型' : '当前模型不可用，请切换或到设置页完成配置'}
-              >
-                <Icon d="M12 2a4 4 0 014 4v1h1a3 3 0 013 3v2h-2v5a3 3 0 01-3 3H9a3 3 0 01-3-3v-5H4V10a3 3 0 013-3h1V6a4 4 0 014-4zm-1 14v3h2v-3h-2zm0-8v6h2V8h-2z" />
-                <select
-                  value={provider}
-                  aria-label="总结模型"
-                  disabled={!settings || savingModel}
-                  onChange={(event) => changeModel(event.target.value)}
-                >
-                  {modelOptions.map((item) => (
-                    <option key={item.value} value={item.value} disabled={!item.usable}>
-                      {item.usable ? item.label : `${item.label}（未配置）`}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="studio-tool studio-tool-select" title={templateName || '选择总结模板'}>
-                <Icon d="M6 2h9l5 5v13a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm8 1.5V8h4.5L14 3.5zM8 12h8v2H8v-2zm0 4h8v2H8v-2z" />
-                <select
-                  value={activeTemplateId}
-                  aria-label="总结模板"
-                  disabled={!templates.length}
-                  onChange={(event) => changeTemplate(event.target.value)}
-                >
-                  {!templates.length && <option value="">暂无可用模板</option>}
-                  {activeTemplateId && !templates.some((item) => item.id === activeTemplateId) && (
-                    <option value={activeTemplateId}>{templateName || '当前模板'}</option>
-                  )}
-                  {templates.map((item) => (
-                    <option key={item.id} value={item.id}>{item.name}</option>
-                  ))}
-                </select>
-              </label>
+              <StudioSelect
+                icon="M12.9 15h-1.8L9.6 11.4 8 15H6.2l2.8-7h1.6l2.3 7zM4 4h16v2H4V4zm2 14h12v2H6v-2z"
+                value="zh-CN"
+                ariaLabel="摘要语言"
+                title="摘要语言"
+                options={[{ value: 'zh-CN', label: '简体中文' }]}
+                onChange={() => undefined}
+              />
+              <StudioSelect
+                icon="M12 2a4 4 0 014 4v1h1a3 3 0 013 3v2h-2v5a3 3 0 01-3 3H9a3 3 0 01-3-3v-5H4V10a3 3 0 013-3h1V6a4 4 0 014-4zm-1 14v3h2v-3h-2zm0-8v6h2V8h-2z"
+                value={provider}
+                ariaLabel="总结模型"
+                title={modelReady
+                  ? '选择总结模型'
+                  : provider === 'local'
+                    ? `本地总结不可用：找不到 ${settings?.summary_model_path || '总结模型文件'}`
+                    : '远程总结不可用：请先在设置里填写 API Base URL'}
+                muted={!modelReady}
+                disabled={!settings || savingModel}
+                placeholder="总结模型"
+                maxWidth={190}
+                options={modelOptions.map((item) => ({
+                  value: item.value,
+                  label: item.label,
+                  hint: item.hint,
+                  disabled: !item.usable,
+                }))}
+                onChange={changeModel}
+              />
+              <StudioSelect
+                icon="M6 2h9l5 5v13a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm8 1.5V8h4.5L14 3.5zM8 12h8v2H8v-2zm0 4h8v2H8v-2z"
+                value={activeTemplateId}
+                ariaLabel="总结模板"
+                title={templateName || '选择总结模板'}
+                disabled={!templates.length}
+                placeholder={templates.length ? '选择模板' : '暂无可用模板'}
+                maxWidth={190}
+                options={[
+                  ...(activeTemplateId && !templates.some((item) => item.id === activeTemplateId)
+                    ? [{ value: activeTemplateId, label: templateName || '当前模板', hint: '不在可用列表' }]
+                    : []),
+                  ...templates.map((item) => ({ value: item.id, label: item.name })),
+                ]}
+                onChange={changeTemplate}
+              />
             </div>
             {generating ? (
               <div className="studio-empty studio-processing">

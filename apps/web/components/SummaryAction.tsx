@@ -57,9 +57,11 @@ export default function SummaryAction({
   const [summaryDone, setSummaryDone] = useState(hasSummary);
   const [moss, setMoss] = useState<{ loaded?: boolean; loading?: boolean; reachable?: boolean }>({});
 
+  // 内置本地模型由 MOSS 用 llama-cli 加载 summary_model_path 指向的 GGUF 做总结，
+  // 所以本机有没有那个文件直接决定本地总结是否可用；远程 provider 必须配 api_base_url。
   const summaryReady = settings.default_provider === 'local'
     ? Boolean(settings.summary_model_found)
-    : Boolean(settings.api_base_url || settings.default_provider);
+    : Boolean(settings.api_base_url);
 
   useEffect(() => {
     onSummaryReady?.(summaryReady);
