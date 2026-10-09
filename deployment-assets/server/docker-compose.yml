@@ -1,0 +1,95 @@
+# Isolated stack for the video-transcribe-platform.
+# All names are prefixed with plugin_parser to avoid clashing with other
+# compose projects on the same host.
+name: plugin_parser
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: plugin_parser-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-media_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-media}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy.env}
+    volumes:
+      - plugin_parser_pg:/var/lib/postgresql/data
+    networks:
+      - plugin_parser_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-media} -d ${POSTGRES_DB:-media_platform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    image: video-platform-api:${IMAGE_TAG:-latest}
+    container_name: plugin_parser-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-media}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-media_platform}
+      API_SECRET: ${API_SECRET:?Set API_SECRET in deploy.env}
+      COOKIE_ENCRYPTION_KEY: ${COOKIE_ENCRYPTION_KEY:?Set COOKIE_ENCRYPTION_KEY in deploy.env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      MOSS_URL: http://moss:9000
+      STORAGE_ROOT: /data
+      # Tell MOSS where the shared media volume is mounted inside its container.
+      MOSS_MEDIA_ROOT: /data
+      MOSS_DOCKER_CONTAINER: plugin_parser-moss
+      MOSS_MODEL_PATH: /models/moss/OpenMOSS-Team/MOSS-Transcribe-Diarize
+      SUMMARY_MODEL_PATH: /models/summary/Qwen3.5-4B-Q4_K_M.gguf
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:${WEB_PORT:-3000}}
+    volumes:
+      - plugin_parser_storage:/data
+      - ${ASSET_ROOT:-/opt/plugin_parser}/models:/models:ro
+    ports:
+      - "${API_PORT:-8000}:8000"
+    networks:
+      - plugin_parser_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      moss:
+        condition: service_started
+
+  moss:
+    image: video-platform-moss:${IMAGE_TAG:-latest}
+    container_name: plugin_parser-moss
+    restart: unless-stopped
+    environment:
+      MOSS_MODEL_PATH: /models/moss/OpenMOSS-Team/MOSS-Transcribe-Diarize
+      SUMMARY_MODEL_PATH: /models/summary/Qwen3.5-4B-Q4_K_M.gguf
+      LLAMA_CLI: /usr/local/bin/llama-cli
+      MOSS_PRELOAD: ${MOSS_PRELOAD:-1}
+    volumes:
+      - ${ASSET_ROOT:-/opt/plugin_parser}/models:/models:ro
+      # Must share the media volume: MOSS reads the uploaded audio by path.
+      - plugin_parser_storage:/data:ro
+    ports:
+      - "127.0.0.1:${MOSS_PORT:-9000}:9000"
+    networks:
+      - plugin_parser_net
+
+  web:
+    image: video-platform-web:${IMAGE_TAG:-latest}
+    container_name: plugin_parser-web
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    networks:
+      - plugin_parser_net
+    depends_on:
+      - api
+
+networks:
+  plugin_parser_net:
+    name: plugin_parser_net
+
+volumes:
+  plugin_parser_pg:
+    name: plugin_parser_pg
+  plugin_parser_storage:
+    name: plugin_parser_storage

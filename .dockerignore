@@ -1,0 +1,17 @@
+# 构建上下文裁剪：仓库根目录下有 5GB+ 的模型/虚拟环境，若不排除，
+# 每次 docker build 都要把整个仓库传给 daemon，构建会慢到不可用。
+.git
+.gitignore
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+storage
+deployment-assets
+media_platform.db
+node_modules
+**/node_modules
+apps/web/.next
+docs
+.env
