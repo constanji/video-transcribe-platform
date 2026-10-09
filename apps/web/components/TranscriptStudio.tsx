@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../lib/api';
 import type { Job, Summary, SummarySettings, Template, Transcript, VideoAsset } from '../lib/types';
 import { cleanSummaryMarkdown } from '../lib/summary-text';
+import { renderMarkdown } from '../lib/markdown';
 import StudioSelect from './StudioSelect';
 
 function Icon({ d, label }: { d: string; label?: string }) {
@@ -122,6 +123,10 @@ export default function TranscriptStudio({
   const transcript: Transcript | undefined = video?.transcripts?.[0];
   const summary: Summary | undefined = video?.summaries?.[0];
   const summaryText = cleanSummaryMarkdown(summary?.content_markdown);
+  const summaryHtml = useMemo(() => renderMarkdown(summaryText), [summaryText]);
+  // 导出文件名用视频标题，去掉文件系统不允许的字符。
+  const fileBase = (video?.title || '总结').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 80) || '总结';
+  const exportRef = useRef<HTMLDetailsElement>(null);
   const turns: Transcript['segments'] = useMemo(() => {
     const segments = transcript?.segments || [];
     if (segments.length) return segments.filter((item) => (item.text || '').trim());
@@ -139,6 +144,47 @@ export default function TranscriptStudio({
       : transcript.text;
     await navigator.clipboard.writeText(content);
     onToast(withSpeaker ? '已复制转录（带说话人）' : '已复制转录内容');
+  }
+
+  function closeExportMenu() {
+    exportRef.current?.removeAttribute('open');
+  }
+
+  // 总结的两种导出：下载 .md，或把渲染后的结果包成独立页面另开标签预览。
+  // Markdown 源文件交给外部编辑器，预览走的是和面板同一份 renderMarkdown 输出。
+  function exportSummary(kind: 'download' | 'preview') {
+    if (!summaryText) return;
+    if (kind === 'download') {
+      const blob = new Blob([summaryText], { type: 'text/markdown;charset=utf-8' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `${fileBase}.md`;
+      link.click();
+      // 不能在 click 后立刻吊销：浏览器把下载排队成异步任务时，吊销 blob URL
+      // 会直接把下载取消掉。延迟回收，既不泄漏也不打断下载。
+      window.setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
+      onToast('已导出 Markdown 文档');
+      return;
+    }
+    const document_ = [
+      '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">',
+      `<title>${fileBase}</title>`,
+      '<meta name="viewport" content="width=device-width,initial-scale=1">',
+      '<style>',
+      'body{margin:0;background:#f6f8fb;font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;color:#1f2933;}',
+      'article{max-width:760px;margin:32px auto;padding:36px 40px;background:#fff;border-radius:14px;box-shadow:0 8px 28px rgba(22,32,48,.08);line-height:1.75;font-size:15px}',
+      'h1,h2,h3,h4{line-height:1.4;margin:24px 0 10px}h1{font-size:22px}h2{font-size:18px}h3{font-size:16px}',
+      'ul,ol{padding-left:24px;margin:0 0 12px}li{margin:5px 0}',
+      'strong{font-weight:650}code{background:#eef2f6;border-radius:5px;padding:1px 6px;font-size:13px}',
+      'blockquote{margin:0 0 12px;padding:2px 0 2px 14px;border-left:3px solid #c9d6e5;color:#5c6b80}',
+      'hr{border:0;border-top:1px solid #e3e7ed;margin:20px 0}a{color:#1d68bb}',
+      '</style></head><body><article>', summaryHtml, '</article></body></html>',
+    ].join('');
+    const blob = new Blob([document_], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener');
+    // 给新标签留出加载时间再回收，避免某些浏览器直接取消打开。
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
   // The model picker mirrors the provider list from the settings page, but the
@@ -240,7 +286,21 @@ export default function TranscriptStudio({
       <div className="studio-card" role="dialog" aria-modal="true" aria-label="转录与总结结果">
         <header className="studio-titlebar">
           <strong>{video?.title || '转录结果'}</strong>
-          <button type="button" className="studio-close" onClick={onClose} aria-label="关闭">×</button>
+          <div className="studio-titlebar-actions">
+            {/* 导出：转录给复制（两种粒度），总结给文档格式（当前支持 Markdown）。 */}
+            <details className="export-menu" ref={exportRef}>
+              <summary aria-label="导出">导出</summary>
+              <div className="copy-menu is-right" role="menu">
+                <p className="export-group">转录</p>
+                <button type="button" disabled={!transcript} onClick={() => { closeExportMenu(); copyTranscript(false); }}>仅复制内容</button>
+                <button type="button" disabled={!transcript} onClick={() => { closeExportMenu(); copyTranscript(true); }}>复制内容与说话人</button>
+                <p className="export-group">总结</p>
+                <button type="button" disabled={!summaryText} onClick={() => { closeExportMenu(); exportSummary('download'); }}>Markdown 文档（.md）</button>
+                <button type="button" disabled={!summaryText} onClick={() => { closeExportMenu(); exportSummary('preview'); }}>预览文档</button>
+              </div>
+            </details>
+            <button type="button" className="studio-close" onClick={onClose} aria-label="关闭">×</button>
+          </div>
         </header>
         <div className="studio-body">
           <section className="studio-pane">
@@ -342,7 +402,11 @@ export default function TranscriptStudio({
                 <button type="button" className="primary-button" onClick={generate}>重新生成摘要</button>
               </div>
             ) : summaryText ? (
-            <article className="studio-summary markdown-body">{summaryText}</article>
+            <article
+              className="studio-summary markdown-body rich-text"
+              // renderMarkdown 输出前已整体做 HTML 转义，这里不会有注入面。
+              dangerouslySetInnerHTML={{ __html: summaryHtml }}
+            />
           ) : summary ? (
             <div className="studio-empty">
               <span className="studio-empty-icon">?</span>

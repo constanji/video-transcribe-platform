@@ -209,3 +209,34 @@
 .live-status.paused{color:#b45309;background:#fff7ed}
 .paused-hint{color:#b45309}
 .meeting-card.is-paused{border-color:#f6d9b0}
+
+/* ---- 渲染后的 Markdown（总结面板与查看器共用） ---- */
+.markdown-body.rich-text{white-space:normal}
+.rich-text>*:first-child{margin-top:0}
+.rich-text>*:last-child{margin-bottom:0}
+.rich-text h1,.rich-text h2,.rich-text h3,.rich-text h4,.rich-text h5,.rich-text h6{margin:20px 0 8px;line-height:1.45;color:var(--text)}
+.rich-text h1{font-size:19px}
+.rich-text h2{font-size:16px}
+.rich-text h3,.rich-text h4{font-size:14.5px}
+.rich-text h5,.rich-text h6{font-size:14px}
+.rich-text p{margin:0 0 10px}
+.rich-text ul,.rich-text ol{margin:0 0 10px;padding-left:22px}
+.rich-text li{margin:5px 0}
+.rich-text li::marker{color:#8b95a3}
+.rich-text strong{font-weight:650;color:var(--text)}
+.rich-text code{background:#eef2f6;border-radius:5px;padding:1px 5px;font-size:12.5px}
+.rich-text hr{border:0;border-top:1px solid var(--line);margin:16px 0}
+.rich-text blockquote{margin:0 0 10px;padding:2px 0 2px 12px;border-left:3px solid #c9d6e5;color:var(--muted)}
+.rich-text a{color:var(--accent)}
+
+/* ---- 标题栏「导出」菜单 ---- */
+.studio-titlebar-actions{display:flex;align-items:center;gap:10px}
+.export-menu{position:relative}
+.export-menu>summary{display:inline-flex;align-items:center;gap:7px;height:36px;padding:0 14px;border:1px solid #dce2ea;border-radius:10px;background:#fff;color:#344052;font:inherit;font-size:13px;cursor:pointer;list-style:none}
+.export-menu>summary::-webkit-details-marker{display:none}
+.export-menu>summary:hover{background:#f7f9fc}
+.export-menu[open]>summary{background:#f2f6fb;border-color:#c9d6e5}
+.copy-menu.is-right{left:auto;right:0;width:218px}
+.export-group{margin:6px 8px 3px;font-size:11px;color:#9aa3af}
+.copy-menu button:disabled{color:#a9b2bf;cursor:default}
+.copy-menu button:disabled:hover{background:transparent}

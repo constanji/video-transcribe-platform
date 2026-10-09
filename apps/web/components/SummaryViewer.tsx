@@ -1,8 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { Summary, Template } from '../lib/types';
 import { cleanSummaryMarkdown } from '../lib/summary-text';
+import { renderMarkdown } from '../lib/markdown';
 
 export default function SummaryViewer({
   summaries,
@@ -19,6 +20,8 @@ export default function SummaryViewer({
   const current = summaries.find((item) => item.id === currentId) || summaries[0];
   const templateName = templates.find((item) => item.id === current?.template_id)?.name || '未指定模板';
   const content = cleanSummaryMarkdown(current?.content_markdown);
+  // 面板与查看器共用同一套渲染：转义后转换，模型输出不会变成标签。
+  const contentHtml = useMemo(() => renderMarkdown(content), [content]);
 
   if (!current) {
     return (
@@ -42,6 +45,8 @@ export default function SummaryViewer({
     link.href = URL.createObjectURL(blob);
     link.download = `summary.${ext}`;
     link.click();
+    // click 后立刻吊销会把排队中的下载取消掉，延迟回收。
+    window.setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
     onToast(`已下载 ${ext.toUpperCase()}`);
   }
 
@@ -59,9 +64,10 @@ export default function SummaryViewer({
         <button type="button" onClick={onRetry}>重新总结</button>
       </div>
       <p className="viewer-meta">模板 {templateName} · {current.provider} / {current.model} · {new Date(current.created_at).toLocaleString('zh-CN')}</p>
-      <article className="viewer-scroll markdown-body">
-        {content || '这次没有可用总结，模型内部过程已过滤，请重新总结。'}
-      </article>
+      <article
+        className="viewer-scroll markdown-body rich-text"
+        dangerouslySetInnerHTML={{ __html: contentHtml || '<p>这次没有可用总结，模型内部过程已过滤，请重新总结。</p>' }}
+      />
     </div>
   );
 }
