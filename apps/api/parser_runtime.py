@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from time import time
 from dataclasses import dataclass, field
 from html import unescape
 from urllib.parse import parse_qs, urlparse
@@ -90,7 +91,7 @@ def detect_platform(url: str) -> str:
         ("twitter", ("twitter.com", "x.com")),
         ("pixiv", ("pixiv.net",)),
         ("xiaoheihe", ("xiaoheihe.cn",)),
-        ("shipinhao", ("weixin.qq.com",)),
+        ("shipinhao", ("weixin.qq.com", "channels.weixin.qq.com")),
         ("qzone", ("qzone.qq.com",)),
     )
     for platform, hosts in mapping:
@@ -99,7 +100,7 @@ def detect_platform(url: str) -> str:
     return "unknown"
 
 
-def parse_media(text: str) -> ParsedMedia:
+def parse_media(text: str, shipinhao_cookie: str = "") -> ParsedMedia:
     url = extract_url(text)
     platform = detect_platform(url)
     with httpx.Client(headers=IOS_HEADER, timeout=25.0, follow_redirects=False) as client:
@@ -113,6 +114,8 @@ def parse_media(text: str) -> ParsedMedia:
             return parsed
         if platform == "bilibili":
             return _parse_bilibili(client, url)
+        if platform == "shipinhao":
+            return _parse_shipinhao(client, url, shipinhao_cookie)
         return _parse_open_graph(client, url, platform)
 
 
@@ -267,6 +270,74 @@ def _parse_bilibili(client: httpx.Client, url: str) -> ParsedMedia:
         platform_video_id=bvid or None,
         variants=_bili_variants(client, bvid, cid),
     )
+
+
+def _parse_shipinhao(client: httpx.Client, url: str, cookie: str) -> ParsedMedia:
+    """Resolve a Weixin Channels share URL to metadata and a playable CDN URL."""
+    token, export_id = _shipinhao_token_eid(url)
+    if not (token and export_id):
+        if not cookie:
+            raise ParseError("微信视频号短链需要配置腾讯元宝 Cookie，长链请使用 channels.weixin.qq.com 链接")
+        response = client.post(
+            "https://yuanbao.tencent.com/api/weixin/get_parse_result",
+            json={"type": "video_channel_url", "url": url, "scene": 1},
+            headers={**DESKTOP_HEADER, "Content-Type": "application/json", "Cookie": cookie,
+                     "Origin": "https://yuanbao.tencent.com", "Referer": "https://yuanbao.tencent.com/chat"},
+        )
+        if response.status_code == 401:
+            raise ParseError("腾讯元宝 Cookie 已失效，请重新登录并更新 Cookie")
+        if response.status_code >= 400:
+            raise ParseError(f"腾讯元宝解析接口请求失败（{response.status_code}）")
+        payload = response.json().get("data") or {}
+        token, export_id = _shipinhao_token_eid(payload.get("playable_url") or "")
+        export_id = export_id or str(payload.get("wx_export_id") or "")
+        if not export_id:
+            raise ParseError("未能从视频号链接获取内容 ID，链接可能已失效")
+
+    rid = f"{int(time()):x}"
+    feed = client.post(
+        "https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info",
+        params={"_rid": rid, "_pageUrl": "https://channels.weixin.qq.com/finder-preview/pages/feed"},
+        json={"baseReq": {"generalToken": token}, "exportId": export_id},
+        headers={**DESKTOP_HEADER, "Content-Type": "application/json",
+                 "Origin": "https://channels.weixin.qq.com",
+                 "Referer": f"https://channels.weixin.qq.com/finder-preview/pages/feed?token={token}&eid={export_id}"},
+    )
+    if feed.status_code >= 400:
+        raise ParseError(f"视频号预览接口请求失败（{feed.status_code}）")
+    body = feed.json()
+    if body.get("errCode") not in (None, 0):
+        raise ParseError(body.get("errMsg") or "视频号预览接口返回错误")
+    info = ((body.get("data") or {}).get("feedInfo") or {})
+    author_info = ((body.get("data") or {}).get("authorInfo") or {})
+    video_url = None
+    for key in ("h264VideoInfo", "h265VideoInfo"):
+        video_url = ((info.get(key) or {}).get("videoUrl")) or video_url
+    video_url = video_url or info.get("videoUrl")
+    if not video_url:
+        raise ParseError("未获取到视频号媒体地址，内容可能已删除或权限不足")
+    title = str(info.get("description") or "视频号视频").strip()
+    duration = ((info.get("h264VideoInfo") or {}).get("duration") or info.get("videoDuration"))
+    try:
+        duration = float(duration) if duration else None
+    except (TypeError, ValueError):
+        duration = None
+    return ParsedMedia(
+        source_url=url,
+        normalized_url=normalize_url(url),
+        platform="shipinhao",
+        title=title[:500],
+        author=author_info.get("nickname") or None,
+        thumbnail_url=_abs_url(info.get("coverUrl")),
+        duration_seconds=duration,
+        platform_video_id=export_id,
+        variants=[MediaItem(format="mp4", quality="原始质量", media_type="video", source_url=video_url)],
+    )
+
+
+def _shipinhao_token_eid(url: str) -> tuple[str, str]:
+    query = parse_qs(urlparse(url).query)
+    return (query.get("token") or [""])[0], (query.get("eid") or query.get("exportId") or [""])[0]
 
 
 def _bili_variants(client: httpx.Client, bvid: str | None, cid: int | None) -> list[MediaItem]:
