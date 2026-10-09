@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
+import traceback
 import uuid
+import base64
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,7 +19,8 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query
+from cryptography.fernet import Fernet, InvalidToken
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -31,11 +37,66 @@ STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 MEETILY_DATA = Path(os.getenv("MEETILY_DATA_DIR", str(Path.home() / "Library/Application Support/com.meetily.ai")))
 DEFAULT_MOSS_MODEL_PATH = os.getenv("MOSS_MODEL_PATH", str(MEETILY_DATA / "funasr-models/OpenMOSS-Team/MOSS-Transcribe-Diarize"))
 DEFAULT_SUMMARY_MODEL_PATH = os.getenv("SUMMARY_MODEL_PATH", str(MEETILY_DATA / "models/summary/Qwen3.5-4B-Q4_K_M.gguf"))
+COOKIE_ENCRYPTION_KEY = os.getenv("COOKIE_ENCRYPTION_KEY", "")
 COVER_DIR = STORAGE_ROOT / "covers"
 COVER_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR = STORAGE_ROOT / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+MEETING_DIR = STORAGE_ROOT / "meetings"
+MEETING_DIR.mkdir(parents=True, exist_ok=True)
+TEMP_DIR = STORAGE_ROOT / "tmp"
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+UPLOAD_FORMATS = {".mp3": "audio", ".wav": "audio", ".m4a": "audio", ".mp4": "video", ".webm": "video", ".mov": "video"}
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def _cookie_cipher() -> Fernet:
+    secret = COOKIE_ENCRYPTION_KEY or os.getenv("API_SECRET", "local-dev-token")
+    # Derive a Fernet-compatible key so deployments can provide a normal secret
+    # without needing to pre-format it. COOKIE_ENCRYPTION_KEY is preferred.
+    key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
+    return Fernet(key)
+
+
+def encrypt_cookie(value: str) -> str:
+    if not value:
+        return ""
+    if value.startswith("enc:v1:"):
+        return value
+    token = _cookie_cipher().encrypt(value.encode("utf-8")).decode("ascii")
+    return f"enc:v1:{token}"
+
+
+def decrypt_cookie(value: str) -> str:
+    if not value:
+        return ""
+    if not value.startswith("enc:v1:"):
+        # Legacy installations stored the value directly. It is re-encrypted
+        # when settings are next persisted.
+        return value
+    try:
+        return _cookie_cipher().decrypt(value[7:].encode("ascii")).decode("utf-8")
+    except (InvalidToken, UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeError("Cookie 加密密钥不匹配，无法读取已保存的 Cookie") from exc
+
+
+def transform_parser_cookies(data: dict[str, Any], encrypt: bool = False) -> tuple[dict[str, Any], bool]:
+    payload = copy.deepcopy(data)
+    changed = False
+    for parser in (payload.get("parsers") or {}).values():
+        value = str(parser.get("cookies") or "")
+        if encrypt:
+            encoded = encrypt_cookie(value)
+            changed = changed or encoded != value
+            parser["cookies"] = encoded
+        else:
+            decoded = decrypt_cookie(value)
+            changed = changed or decoded != value
+            parser["cookies"] = decoded
+    return payload, changed
 
 
 class Base(DeclarativeBase):
@@ -146,6 +207,34 @@ class ConfigRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(255), default="默认密钥")
+    prefix: Mapped[str] = mapped_column(String(16))
+    hashed: Mapped[str] = mapped_column(String(64), index=True)
+    revoked: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class Meeting(Base):
+    __tablename__ = "meetings"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    title: Mapped[str] = mapped_column(String(500), default="未命名会议")
+    mode: Mapped[str] = mapped_column(String(32), default="live")
+    status: Mapped[str] = mapped_column(String(32), default="created")
+    language: Mapped[str] = mapped_column(String(32), default="zh")
+    audio_source: Mapped[str] = mapped_column(String(32), default="mic")
+    audio_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    video_asset_id: Mapped[str | None] = mapped_column(ForeignKey("video_assets.id", ondelete="SET NULL"), nullable=True, index=True)
+    api_key_id: Mapped[str | None] = mapped_column(ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True)
+    live_segments_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 Base.metadata.create_all(engine)
 with engine.begin() as conn:
     if DATABASE_URL.startswith("sqlite"):
@@ -167,6 +256,10 @@ with engine.begin() as conn:
             conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN logs_json JSON"))
         if "progress_json" not in job_cols:
             conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN progress_json JSON"))
+        if "input_media_type" not in job_cols:
+            conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN input_media_type VARCHAR(16)"))
+        if "fallback_used" not in job_cols:
+            conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN fallback_used BOOLEAN DEFAULT 0"))
     else:
         for statement in (
             "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS input_media_type VARCHAR(16)",
@@ -201,9 +294,14 @@ class TemplateRequest(BaseModel):
 
 
 app = FastAPI(title="Video Transcribe Platform API", version="0.1.0")
+_cors_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if not _cors_origins:
+    # Local development default; deployments must set ALLOWED_ORIGINS.
+    _cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_cors_origins,
+    allow_origin_regex=os.getenv("ALLOWED_ORIGIN_REGEX", r"http://(localhost|127\.0\.0\.1):\d+"),
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
@@ -327,6 +425,8 @@ def job_dict(job: ProcessingJob) -> dict[str, Any]:
 
 
 PLATFORMS = [
+    {"id": "meeting", "name": "会议纪要", "logo": None, "featured": False},
+    {"id": "upload", "name": "本地上传", "logo": None, "featured": False},
     {"id": "bilibili", "name": "B站", "logo": "bilibili.png", "featured": True},
     {"id": "douyin", "name": "抖音", "logo": "douyin.png", "featured": True},
     {"id": "kuaishou", "name": "快手", "logo": "kuaishou.png", "featured": True},
@@ -437,6 +537,8 @@ def mask_settings(group: str, data: dict[str, Any]) -> dict[str, Any]:
 def merge_settings(group: str, stored: dict[str, Any] | None) -> dict[str, Any]:
     base = SETTING_DEFAULTS[group]
     merged = {**base, **(stored or {})}
+    if group == "parser":
+        merged, _ = transform_parser_cookies(merged)
     if group == "transcription":
         if merged.get("default_language") in (None, "", "auto"):
             merged["default_language"] = "zh"
@@ -626,7 +728,12 @@ def _related_videos(session: Session, parsed) -> list[VideoAsset]:
 def parse(request: ParseRequest, session: Session = Depends(db_session)):
     now = datetime.now(timezone.utc)
     try:
-        parsed = parse_media(request.url)
+        parser_settings = merge_settings(
+            "parser",
+            (session.get(ConfigRecord, "parser") or ConfigRecord(key="parser", value_json={})).value_json,
+        )
+        shipinhao = (parser_settings.get("parsers") or {}).get("shipinhao") or {}
+        parsed = parse_media(request.url, shipinhao_cookie=str(shipinhao.get("cookies") or ""))
     except ParseError as exc:
         raise HTTPException(502, str(exc)) from exc
     related = _related_videos(session, parsed)
@@ -685,9 +792,157 @@ def _store_cover(video_id: str, url: str | None, referer: str) -> Path | None:
     return path
 
 
+def _storage_relative(path: Path) -> Path | None:
+    try:
+        return path.resolve().relative_to(STORAGE_ROOT.resolve())
+    except ValueError:
+        return None
+
+
+def _moss_media_root() -> str:
+    configured = os.getenv("MOSS_MEDIA_ROOT")
+    if configured is not None:
+        return configured.rstrip("/")
+    # Windows 上 MOSS 跑在 Docker 里，把 STORAGE_ROOT 挂到容器 /data
+    return "/data" if os.name == "nt" else ""
+
+
+def path_for_moss(host_path: str | None) -> str | None:
+    if not host_path:
+        return None
+    path = Path(host_path)
+    root = _moss_media_root()
+    rel = _storage_relative(path)
+    if root and rel is not None:
+        return f"{root}/{rel.as_posix()}"
+    return str(path)
+
+
+def _ffprobe_bin() -> str | None:
+    return shutil.which("ffprobe") or shutil.which("ffprobe.exe")
+
+
+def _docker_ffprobe(path: Path) -> subprocess.CompletedProcess[str]:
+    rel = _storage_relative(path)
+    if rel is None:
+        raise HTTPException(503, "服务器未安装 FFmpeg，且文件不在可挂载的 storage 目录")
+    container = os.getenv("MOSS_DOCKER_CONTAINER", "moss-transcribe")
+    inner = f"{_moss_media_root() or '/data'}/{rel.as_posix()}"
+    return subprocess.run(
+        ["docker", "exec", container, "ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "json", inner],
+        capture_output=True, text=True, timeout=30,
+    )
+
+
+def _probe_media(path: Path) -> dict[str, Any]:
+    args = ["-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "json", str(path)]
+    ffprobe = _ffprobe_bin()
+    try:
+        if ffprobe:
+            process = subprocess.run([ffprobe, *args], capture_output=True, text=True, timeout=30)
+        else:
+            process = _docker_ffprobe(path)
+    except FileNotFoundError as exc:
+        raise HTTPException(503, "服务器未安装 FFmpeg，无法校验媒体文件") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(400, "媒体文件校验超时，请确认文件未损坏") from exc
+    if process.returncode != 0:
+        detail = (process.stderr or process.stdout or "").strip()
+        if "No such file" in detail or "unable to find" in detail.lower():
+            raise HTTPException(503, "转录容器无法读取上传文件，请确认已挂载 storage 目录")
+        raise HTTPException(400, "无法识别该媒体文件，请确认文件未损坏")
+    try:
+        payload = json.loads(process.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "无法识别该媒体文件，请确认文件未损坏") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "无法识别该媒体文件，请确认文件未损坏")
+    return payload
+
+
+def _uploaded_media_info(path: Path, expected_type: str) -> float | None:
+    payload = _probe_media(path)
+    stream_types = {str(item.get("codec_type")) for item in payload.get("streams") or []}
+    # 转录只要求音轨；纯音频 MP4 / 录音 WebM 不应因为没有视频轨被拒
+    if "audio" not in stream_types:
+        raise HTTPException(400, "文件中未检测到可转录的音轨")
+    try:
+        duration = float((payload.get("format") or {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    return duration or None
+
+
+def _video_detail(video: VideoAsset, session: Session) -> dict[str, Any]:
+    jobs = session.scalars(select(ProcessingJob).where(ProcessingJob.video_asset_id == video.id).order_by(ProcessingJob.created_at.desc())).all()
+    transcripts = session.scalars(select(Transcript).where(Transcript.video_asset_id == video.id).order_by(Transcript.created_at.desc())).all()
+    summaries = session.scalars(select(Summary).where(Summary.video_asset_id == video.id).order_by(Summary.created_at.desc())).all()
+    return video_dict(video, session) | {
+        "jobs": [job_dict(job) for job in jobs],
+        "transcripts": [{"id": t.id, "model": t.model, "language": t.language, "text": t.text, "segments": t.segments_json, "created_at": t.created_at.isoformat()} for t in transcripts],
+        "summaries": [summary_dict(item) for item in summaries],
+    }
+
+
+@app.post("/api/uploads")
+async def upload_media(file: UploadFile = File(...), session: Session = Depends(db_session)):
+    original_name = Path((file.filename or "").replace("\\", "/")).name
+    extension = Path(original_name).suffix.lower()
+    media_type = UPLOAD_FORMATS.get(extension)
+    if not original_name or not media_type:
+        raise HTTPException(400, "仅支持 MP3、WAV、M4A、MP4、WebM 和 MOV 文件")
+    content_type = (file.content_type or "").lower().split(";")[0].strip()
+    if content_type and content_type not in {"application/octet-stream", "application/mp4", "binary/octet-stream"}:
+        if not (content_type.startswith("video/") or content_type.startswith("audio/")):
+            raise HTTPException(400, "文件类型与扩展名不一致")
+    temp_path = TEMP_DIR / f"upload-{uuid.uuid4().hex}.part"
+    final_path: Path | None = None
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with temp_path.open("wb") as target:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, "单个文件不能超过 500MB")
+                digest.update(chunk)
+                target.write(chunk)
+        if size == 0:
+            raise HTTPException(400, "不能上传空文件")
+        sha256 = digest.hexdigest()
+        source_url = f"upload://sha256/{sha256}"
+        existing = session.scalars(select(VideoAsset).where(VideoAsset.normalized_url == source_url)).first()
+        if existing:
+            temp_path.unlink(missing_ok=True)
+            return {"video": _video_detail(existing, session), "duplicate": True}
+        duration = _uploaded_media_info(temp_path, media_type)
+        final_path = UPLOAD_DIR / f"{sha256}{extension}"
+        os.replace(temp_path, final_path)
+        now = datetime.now(timezone.utc)
+        video = VideoAsset(source_url=source_url, normalized_url=source_url, platform="upload", source_platform="upload", platform_video_id=sha256, title=Path(original_name).stem[:500] or "未命名上传", author="本地上传", duration_seconds=duration, parse_status="uploaded", available_formats=[{"format": extension[1:], "quality": "原始文件"}], last_processed_at=now)
+        session.add(video)
+        session.flush()
+        session.add(MediaVariant(video_asset_id=video.id, format=extension[1:], quality="原始文件", media_type=media_type, local_path=str(final_path), file_size=size, download_status="downloaded"))
+        session.commit()
+        session.refresh(video)
+        return {"video": _video_detail(video, session), "duplicate": False}
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        if final_path and final_path.exists():
+            final_path.unlink()
+        raise
+    finally:
+        await file.close()
+
+
 @app.get("/api/videos")
 def list_videos(session: Session = Depends(db_session), q: str | None = None):
-    query = select(VideoAsset).order_by(VideoAsset.updated_at.desc())
+    query = (
+        select(VideoAsset)
+        .where(VideoAsset.platform != "meeting")
+        .order_by(VideoAsset.updated_at.desc())
+    )
     if q:
         query = query.where(VideoAsset.title.ilike(f"%{q}%"))
     return [video_dict(v, session) for v in session.scalars(query).all()]
@@ -696,7 +951,10 @@ def list_videos(session: Session = Depends(db_session), q: str | None = None):
 @app.get("/api/videos/recent")
 def recent_videos(session: Session = Depends(db_session)):
     videos = session.scalars(
-        select(VideoAsset).order_by(func.coalesce(VideoAsset.last_processed_at, VideoAsset.updated_at).desc()).limit(6)
+        select(VideoAsset)
+        .where(VideoAsset.platform != "meeting")
+        .order_by(func.coalesce(VideoAsset.last_processed_at, VideoAsset.updated_at).desc())
+        .limit(6)
     ).all()
     return [video_dict(v, session) for v in videos]
 
@@ -709,7 +967,7 @@ def history(
     job_type: str | None = None,
     status: str | None = None,
 ):
-    query = select(VideoAsset).order_by(VideoAsset.updated_at.desc())
+    query = select(VideoAsset).where(VideoAsset.platform != "meeting").order_by(VideoAsset.updated_at.desc())
     if q:
         like = f"%{q}%"
         query = query.where(or_(VideoAsset.title.ilike(like), VideoAsset.author.ilike(like), VideoAsset.platform.ilike(like)))
@@ -742,14 +1000,7 @@ def get_video(video_id: str, session: Session = Depends(db_session)):
     video = session.get(VideoAsset, video_id)
     if not video:
         raise HTTPException(404, "视频不存在")
-    jobs = session.scalars(select(ProcessingJob).where(ProcessingJob.video_asset_id == video_id).order_by(ProcessingJob.created_at.desc())).all()
-    transcripts = session.scalars(select(Transcript).where(Transcript.video_asset_id == video_id).order_by(Transcript.created_at.desc())).all()
-    summaries = session.scalars(select(Summary).where(Summary.video_asset_id == video_id).order_by(Summary.created_at.desc())).all()
-    return video_dict(video, session) | {
-        "jobs": [job_dict(job) for job in jobs],
-        "transcripts": [{"id": t.id, "model": t.model, "language": t.language, "text": t.text, "segments": t.segments_json, "created_at": t.created_at.isoformat()} for t in transcripts],
-        "summaries": [summary_dict(s) for s in summaries],
-    }
+    return _video_detail(video, session)
 
 
 @app.get("/api/videos/{video_id}/thumbnail")
@@ -860,6 +1111,38 @@ def _create_media_job(session: Session, video: VideoAsset, job_type: str, messag
     return job
 
 
+def _moss_busy_message(settings: dict[str, Any] | None = None) -> str | None:
+    """MOSS 正在跑别的批量任务时返回提示文案，用于「下单前」把排队说清楚。"""
+    config = settings or current_transcription()
+    moss = probe_moss(moss_service_url(config))
+    if moss.get("busy"):
+        return f"转录服务正忙于另一个任务（{moss.get('busy_job') or '未知任务'}），请等它完成或取消后再开始"
+    return None
+
+
+@app.delete("/api/jobs/{job_id}")
+def cancel_job(job_id: str, session: Session = Depends(db_session)):
+    """取消在途任务：MOSS 侧会 kill 掉推理子进程，立即释放推理锁。"""
+    job = session.get(ProcessingJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    if job.status in {"completed", "failed", "cancelled"}:
+        return job_dict(job)
+    moss_id = (job.progress_json or {}).get("moss_job_id")
+    if moss_id:
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                client.delete(f"{moss_service_url(current_transcription())}/v1/transcriptions/{moss_id}")
+        except Exception:  # noqa: BLE001 - MOSS 不可用时也要把本地任务结掉
+            pass
+    job.status = "cancelled"
+    job.current_stage = "cancelled"
+    job.error_message = "任务已取消"
+    job.finished_at = datetime.now(timezone.utc)
+    session.commit()
+    return job_dict(job)
+
+
 @app.post("/api/videos/{video_id}/transcribe")
 def transcribe(video_id: str, payload: dict[str, Any] | None = None, session: Session = Depends(db_session)):
     video = session.get(VideoAsset, video_id)
@@ -867,7 +1150,17 @@ def transcribe(video_id: str, payload: dict[str, Any] | None = None, session: Se
         raise HTTPException(404, "视频不存在")
     body = payload or {}
     settings = current_transcription()
+    moss = probe_moss(moss_service_url(settings))
+    if not moss.get("reachable"):
+        raise HTTPException(503, "转录服务未连接，请先启动本机 MOSS")
+    if not moss.get("model_loaded"):
+        detail = moss.get("warmup_error") or ("模型正在加载，请稍后再试" if moss.get("model_loading") else "转录模型尚未加载")
+        raise HTTPException(409, str(detail))
+    if moss.get("busy"):
+        raise HTTPException(409, f"转录服务正忙于另一个任务（{moss.get('busy_job') or '未知任务'}），请等待或取消后再开始")
     language = (body.get("transcription") or {}).get("language") or settings.get("default_language") or "zh"
+    if language not in {"zh", "auto", "en"}:
+        raise HTTPException(400, "不支持的转录语言")
     job = _create_media_job(session, video, "transcribe", "转录任务已创建")
     threading.Thread(target=execute_transcribe_job, args=(job.id, language), daemon=True).start()
     return job_dict(job)
@@ -899,17 +1192,26 @@ def _transcribe_progress(payload: dict[str, Any], waited: int, audio_seconds: fl
         audio = audio_seconds
     audio = float(audio or 0) or None
     stage = str(payload.get("stage") or "transcribing")
-    rtf = 1.8 if stage == "transcribing" else 1.0
+    running = str(payload.get("status") or "running") == "running"
+    # MOSS 已改用 fp32（CPU 上比 bf16 快约 4~5 倍），实时倍数约 2.5；
+    # 可用 MOSS_RTF_HINT 覆盖。估时只影响进度条，不影响实际完成判断。
+    rtf = float(os.environ.get("MOSS_RTF_HINT") or 2.5) if stage == "transcribing" else 1.0
     estimate = 90 if stage == "loading_model" else (max(audio * rtf, 30) if audio else 160)
-    time_ratio = min(0.93, elapsed / estimate) if estimate else 0
-    from_time = 0.30 + 0.42 * time_ratio
-    from_moss = 0.28 + 0.46 * moss_ratio
+    time_ratio = min(0.97, elapsed / estimate) if estimate else 0
+    from_time = 0.30 + 0.62 * time_ratio
+    from_moss = 0.28 + 0.64 * moss_ratio
     overall = from_moss if moss_ratio >= 0.15 else max(from_moss, from_time)
-    overall = min(0.74, max(0.28, overall))
+    if running and elapsed > estimate:
+        overall = min(0.94, max(overall, 0.80 + 0.14 * min(1.0, (elapsed - estimate) / max(estimate, 1))))
+    overall = min(0.95, max(0.28, overall))
     eta = payload.get("eta_seconds")
     if eta is None and audio:
         eta = max(0, int(estimate - elapsed))
+    if running and eta is not None and int(eta) <= 0:
+        eta = max(30, int(max(estimate - elapsed, elapsed * 0.25)))
     message = str(payload.get("message") or "正在转录")
+    if running and stage == "transcribing":
+        message = f"CPU 正在推理 {int(audio or 0)} 秒音频，已用 {elapsed} 秒；百分比仅为估时，完成前不会到 100%"
     detail = {
         "stage": stage,
         "message": message,
@@ -976,10 +1278,8 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
         return None
     label = media.quality or media.format or "媒体文件"
     _append_job_log(session, job, f"找到媒体：{label}", "info", "extracting_audio", 0.16)
-    if media.local_path and Path(media.local_path).exists():
-        media_url = f"{PUBLIC_API_URL}/api/videos/{job.video_asset_id}/download/{media.id}"
-    else:
-        media_url = media.source_url
+    local_media_path = path_for_moss(media.local_path) if media.local_path and Path(media.local_path).exists() else None
+    media_url = None if local_media_path else media.source_url
     _append_job_log(session, job, "正在提交转录任务", "info", "transcribe_queued", 0.28)
     try:
         with httpx.Client(timeout=20.0) as client:
@@ -987,6 +1287,7 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
                 f"{moss_url}/v1/transcriptions",
                 json={
                     "media_url": media_url,
+                    "media_path": local_media_path,
                     "language": language or "zh",
                     "duration_seconds": video.duration_seconds,
                     "referer": video.source_url,
@@ -1008,37 +1309,60 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
         "stage": "queued",
         "message": "转录服务已接收",
         "percent": 30,
+        "moss_job_id": moss_id,
     })
     result = None
     last_stage = ""
-    for waited in range(900):
+    # 轮询上限：至少 15 分钟，或按音频时长 15x 估算。
+    # 原实现固定 900×2s（30 分钟）且循环体没有异常保护，任何一次 DB/解析异常
+    # 都会让线程静默退出，导致结果早就产出、平台却永远收不到（本次事故根因）。
+    max_polls = max(450, int((video.duration_seconds or 0) * 15))
+    consecutive_errors = 0
+    for waited in range(max_polls):
         time.sleep(2)
-        job = session.get(ProcessingJob, job.id)
-        if not job or job.status == "cancelled":
-            return None
         try:
+            job = session.get(ProcessingJob, job.id)
+            if not job or job.status == "cancelled":
+                return None
             with httpx.Client(timeout=15.0) as client:
                 status = client.get(f"{moss_url}/v1/transcriptions/{moss_id}")
-        except httpx.RequestError as exc:
-            _fail_job(session, job, f"轮询转录服务失败：{exc}", "transcribing")
-            return None
-        if status.status_code >= 400:
-            _fail_job(session, job, "转录任务查询失败", "transcribing")
-            return None
-        payload = status.json()
-        moss_status = payload.get("status")
-        overall, detail, _message = _transcribe_progress(payload, waited, video.duration_seconds)
-        stage = str(payload.get("stage") or "")
-        stage_log = {
-            "downloading": "正在下载媒体",
-            "converting": "正在提取音频",
-            "loading_model": "正在加载转录模型",
-            "transcribing": "正在转录推理",
-            "completed": "转录完成",
-        }.get(stage)
-        log_text = stage_log if stage and stage != last_stage else ((job.logs_json or [{}])[-1].get("message") or "正在转录")
-        last_stage = stage or last_stage
-        _append_job_log(session, job, log_text, "info", "transcribing", overall, detail)
+            if status.status_code >= 400:
+                raise RuntimeError(f"转录任务查询返回 HTTP {status.status_code}")
+            payload = status.json()
+            moss_status = payload.get("status")
+            overall, detail, _message = _transcribe_progress(payload, waited, video.duration_seconds)
+            # moss_job_id 必须一直保留在 progress_json 里：轮询会整体覆盖 detail，
+            # 不带上它的话，重启对账/取消接口就拿不到 moss_id，孤儿任务就回收不掉。
+            detail["moss_job_id"] = moss_id
+            stage = str(payload.get("stage") or "")
+            stage_log = {
+                "downloading": "正在下载媒体",
+                "converting": "正在提取音频",
+                "loading_model": "正在加载转录模型",
+                "transcribing": "正在转录推理",
+                "completed": "转录完成",
+            }.get(stage)
+            log_text = stage_log if stage and stage != last_stage else ((job.logs_json or [{}])[-1].get("message") or "正在转录")
+            last_stage = stage or last_stage
+            _append_job_log(session, job, log_text, "info", "transcribing", overall, detail)
+        except Exception as exc:  # noqa: BLE001 - 单次失败必须容忍并重试，绝不能静默断掉轮询
+            consecutive_errors += 1
+            try:
+                current = session.get(ProcessingJob, job.id)
+                if current and (consecutive_errors <= 3 or consecutive_errors % 20 == 0):
+                    _append_job_log(session, current, f"轮询转录服务出错（第 {consecutive_errors} 次，继续重试）：{exc}", "warning")
+            except Exception:
+                pass
+            if consecutive_errors >= 60:
+                try:
+                    current = session.get(ProcessingJob, job.id)
+                    if current:
+                        _fail_job(session, current, f"连续 {consecutive_errors} 次轮询转录服务失败：{exc}", "transcribing")
+                except Exception:
+                    pass
+                return None
+            continue
+        consecutive_errors = 0
         if moss_status == "completed":
             result = payload.get("result") or {}
             break
@@ -1331,7 +1655,14 @@ def list_templates(listed: bool | None = Query(None), session: Session = Depends
 
 def config_endpoint(key: str, session: Session, payload: dict[str, Any] | None = None):
     record = session.get(ConfigRecord, key)
-    current = merge_settings(key, record.value_json if record else {})
+    raw_stored = record.value_json if record else {}
+    current = merge_settings(key, raw_stored)
+    # Migrate legacy plaintext cookies as soon as the settings endpoint is used.
+    if key == "parser" and record is not None:
+        encrypted, changed = transform_parser_cookies(raw_stored, encrypt=True)
+        if changed:
+            record.value_json = encrypted
+            session.commit()
     if payload is not None:
         next_value = {**current, **payload}
         next_value.pop("moss_model_found", None)
@@ -1346,6 +1677,7 @@ def config_endpoint(key: str, session: Session, payload: dict[str, Any] | None =
                 if item.get("cookies") in (None, ""):
                     item["cookies"] = previous.get("cookies") or ""
             next_value["parsers"] = parsers
+            next_value, _ = transform_parser_cookies(next_value, encrypt=True)
         if record is None:
             record = ConfigRecord(key=key, value_json=next_value)
             session.add(record)
@@ -1439,5 +1771,173 @@ def delete_template(template_id: str, session: Session = Depends(db_session)):
 def delete_video(video_id: str, session: Session = Depends(db_session)):
     video = session.get(VideoAsset, video_id)
     if not video: raise HTTPException(404, "视频不存在")
+    if (video.platform or video.source_platform) == "upload":
+        active_job = session.scalars(
+            select(ProcessingJob).where(
+                ProcessingJob.video_asset_id == video_id,
+                ProcessingJob.job_type == "transcribe",
+                ProcessingJob.status.in_(("queued", "running")),
+            ).limit(1)
+        ).first()
+        if active_job:
+            raise HTTPException(409, "转录任务仍在运行，请完成或失败后再删除上传文件")
+        upload_root = UPLOAD_DIR.resolve()
+        variants = session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video_id)).all()
+        for variant in variants:
+            if not variant.local_path:
+                continue
+            path = Path(variant.local_path).resolve()
+            if not path.is_relative_to(upload_root):
+                raise HTTPException(500, "拒绝删除受管上传目录以外的文件")
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise HTTPException(500, "无法删除上传文件，请检查本地存储权限") from exc
     session.delete(video); session.commit()
     return {"deleted": video_id}
+
+
+from .meetings import register_meeting_routes
+
+register_meeting_routes(app)
+
+
+def _stale_seconds() -> float:
+    try:
+        return float(os.getenv("MEETING_STALE_SECONDS", "180"))
+    except (TypeError, ValueError):
+        return 180.0
+
+
+def _utcnow_naive() -> datetime:
+    """数据库里的 DateTime 列不带时区（存 UTC），比较时必须用 naive UTC，否则相减会抛 TypeError。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _as_naive_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo is not None else value
+
+
+def _has_active_job(session: Session, video_asset_id: str | None) -> bool:
+    if not video_asset_id:
+        return False
+    return session.scalar(
+        select(ProcessingJob.id).where(
+            ProcessingJob.video_asset_id == video_asset_id,
+            ProcessingJob.status.in_(("running", "queued")),
+        ).limit(1)
+    ) is not None
+
+
+def _reconcile_meetings(session: Session, now: datetime, include_recording: bool) -> None:
+    """把卡死的会议状态收敛掉：跟随最新任务的终态落地。
+
+    只在「确实没有对应活动」时动手，永不误伤正在录音/正在转录的会议。
+    """
+    from .meetings import finalize_live_meeting
+
+    statuses = ("recording", "processing") if include_recording else ("processing",)
+    stale = _stale_seconds()
+    for meeting in session.scalars(select(Meeting).where(Meeting.status.in_(statuses))).all():
+        if _has_active_job(session, meeting.video_asset_id):
+            continue
+        # 最新任务已到终态时，会议必须跟着收敛。
+        # 少这一步就会出现「任务已 failed、会议永远 processing」：前端既看不到错误，也没有重试出口。
+        # 注意这里必须在 audio_path 判断之前：录音文件还在时反而正是需要收敛的场景（文件可用于重试）。
+        job = session.scalars(
+            select(ProcessingJob)
+            .where(ProcessingJob.video_asset_id == meeting.video_asset_id)
+            .order_by(ProcessingJob.created_at.desc())
+            .limit(1)
+        ).first()
+        if job is not None and job.status in {"completed", "failed", "cancelled"}:
+            if job.status == "completed" and _latest_transcript(session, meeting.video_asset_id):
+                meeting.status = "ready"
+                meeting.error_message = None
+                meeting.updated_at = now
+                continue
+            if job.status in {"failed", "cancelled"}:
+                meeting.status = "failed"
+                meeting.error_message = (
+                    job.error_message or ("转录任务已取消" if job.status == "cancelled" else "终稿转录失败，请重试")
+                )
+                meeting.updated_at = now
+                continue
+        if meeting.audio_path and Path(meeting.audio_path).exists():
+            continue
+        stamp = _as_naive_utc(meeting.updated_at or meeting.created_at)
+        age = (now - stamp).total_seconds() if stamp else 0.0
+        # recording 在启动时必然已无活跃 WS；processing 则需超过阈值才算僵尸。
+        if not include_recording and age <= stale:
+            continue
+        if meeting.live_segments_json:
+            finalize_live_meeting(session, meeting)
+        else:
+            meeting.status = "failed"
+            meeting.error_message = "服务重启导致转录中断，请重新录制或重试"
+            meeting.updated_at = now
+    session.commit()
+
+
+def _cancel_orphan_moss_jobs(session: Session) -> None:
+    """重启后，把上一个进程留下的在途任务在 MOSS 侧也取消掉。
+
+    少了这一步，平台重启后 MOSS 里的推理还在跑、结果也没人来取，
+    而且一直占着唯一的推理锁，后续任务全部排不上（本次事故的元凶）。
+    """
+    settings = current_transcription()
+    url = moss_service_url(settings)
+    for job in session.scalars(
+        select(ProcessingJob).where(ProcessingJob.status.in_(("running", "queued")))
+    ).all():
+        moss_id = (job.progress_json or {}).get("moss_job_id")
+        if not moss_id:
+            continue
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                client.delete(f"{url}/v1/transcriptions/{moss_id}")
+        except Exception:  # noqa: BLE001 - MOSS 不可用时不能阻塞启动
+            pass
+
+
+def _reconcile_on_startup() -> None:
+    """启动对账：清理上一进程遗留的僵尸状态。
+
+    注意：仅在单 worker 部署下安全（本仓 docker CMD 未使用 --workers）。
+    多 worker 时每个 worker 都会执行，可能误杀其它 worker 正在跑的任务。
+    """
+    now = _utcnow_naive()
+    with SessionLocal() as session:
+        # 在途任务的线程随进程一起消失：先让 MOSS 那边也停下，再置失败。
+        _cancel_orphan_moss_jobs(session)
+        for job in session.scalars(
+            select(ProcessingJob).where(ProcessingJob.status.in_(("running", "queued")))
+        ).all():
+            job.status = "failed"
+            job.error_message = job.error_message or "服务重启导致任务中断"
+            job.finished_at = now
+        session.commit()
+        _reconcile_meetings(session, now, include_recording=True)
+
+
+def _sweep_stale_meetings() -> None:
+    interval = float(os.getenv("MEETING_SWEEP_SECONDS", "60") or 60)
+    while True:
+        time.sleep(interval)
+        try:
+            with SessionLocal() as session:
+                _reconcile_meetings(session, _utcnow_naive(), include_recording=False)
+        except Exception:
+            traceback.print_exc()
+
+
+@app.on_event("startup")
+def _start_state_guard() -> None:
+    try:
+        _reconcile_on_startup()
+    except Exception:
+        traceback.print_exc()
+    threading.Thread(target=_sweep_stale_meetings, daemon=True, name="meeting-sweeper").start()
+
