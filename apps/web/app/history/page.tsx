@@ -12,7 +12,7 @@ import { api } from '../../lib/api';
 import type { MeetingHistoryItem, Platform, Template, VideoAsset } from '../../lib/types';
 
 export default function HistoryPage() {
-  const [tab, setTab] = useState<'video' | 'meeting'>('video');
+  const [tab, setTab] = useState<'video' | 'meeting'>(() => (new URLSearchParams(window.location.search).get('tab') === 'meeting' ? 'meeting' : 'video'));
   const [items, setItems] = useState<VideoAsset[]>([]);
   const [meetings, setMeetings] = useState<MeetingHistoryItem[]>([]);
   const [selectedMeeting, setSelectedMeeting] = useState<MeetingHistoryItem>();
@@ -48,7 +48,12 @@ export default function HistoryPage() {
     const data = await listMeetings().catch(() => []);
     setMeetings(data);
     if (data.length > 0) {
-      setSelectedMeeting((prev) => (prev && data.some((item) => item.id === prev.id) ? prev : data[0]));
+      // 支持 /history?tab=meeting&meeting=<id> 深链：主页会议卡片点击后直达该会议详情。
+      const queryMeeting = new URLSearchParams(window.location.search).get('meeting');
+      setSelectedMeeting((prev) => {
+        const wanted = data.find((item) => item.id === (queryMeeting || prev?.id));
+        return wanted || data[0];
+      });
     } else {
       setSelectedMeeting(undefined);
     }

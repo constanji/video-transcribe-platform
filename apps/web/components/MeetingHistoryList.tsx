@@ -56,7 +56,7 @@ export default function MeetingHistoryList({
     return (
       <div className="empty-state">
         还没有会议纪要记录
-        <a href="/upload">去创建一个会议 →</a>
+        <a href="/">去创建一个会议 →</a>
       </div>
     );
   }

@@ -36,7 +36,7 @@ export default function HistoryTimeline({
     return (
       <div className="empty-state">
         还没有历史解析任务
-        <a href="/">去解析一个视频 →</a>
+        <a href="/parse">去解析一个视频 →</a>
       </div>
     );
   }
