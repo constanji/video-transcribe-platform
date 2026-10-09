@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api, logoSrc } from '../lib/api';
 import type { Job, MediaVariant, Platform, VideoAsset } from '../lib/types';
 import DownloadAction from './DownloadAction';
@@ -48,8 +48,11 @@ export default function ParsedVideoCard({
   video,
   platforms,
   variants,
+  id,
   loading,
   initialPanel = null,
+  meetingMode = false,
+  preferredTemplateName,
   onReparse,
   onToast,
   onPanelChange,
@@ -57,8 +60,11 @@ export default function ParsedVideoCard({
   video: VideoAsset;
   platforms: Platform[];
   variants: MediaVariant[];
+  id?: string;
   loading: boolean;
   initialPanel?: 'download' | 'summary' | AnalyzePanel | null;
+  meetingMode?: boolean;
+  preferredTemplateName?: string;
   onReparse: () => void;
   onToast: (message: string, kind?: 'success' | 'error') => void;
   onPanelChange?: (panel: 'download' | 'summary' | AnalyzePanel | null) => void;
@@ -71,6 +77,9 @@ export default function ParsedVideoCard({
   const [hasTranscript, setHasTranscript] = useState(Boolean(video.has_transcript));
   const [hasSummary, setHasSummary] = useState(Boolean(video.has_summary));
   const [busy, setBusy] = useState(false);
+  const [language, setLanguage] = useState('zh');
+  const [mossReady, setMossReady] = useState(false);
+  const [mossMessage, setMossMessage] = useState('正在检查转录服务…');
   const platform = platforms.find((item) => item.id === video.platform);
   const analyzeOpen = panel === 'transcribe' || panel === 'summarize';
   const transcribeRunning = isRunning(transcribeJob);
@@ -82,6 +91,30 @@ export default function ParsedVideoCard({
     setHasTranscript(hasUsableTranscript(video));
     setHasSummary(hasUsableSummary(video));
   }, [video.id, video.last_processed_at, video.has_transcript, video.has_summary]);
+
+  useEffect(() => {
+    api<{ default_language?: string }>('/api/settings/transcription').then((settings) => {
+      if (settings.default_language) setLanguage(settings.default_language);
+    }).catch(() => undefined);
+  }, [video.id]);
+
+  useEffect(() => {
+    let active = true;
+    async function checkMoss() {
+      try {
+        const health = await api<{ moss_reachable?: boolean; moss_model_loaded?: boolean; moss_model_loading?: boolean; moss_warmup_error?: string | null }>('/api/system/health');
+        if (!active) return;
+        const ready = Boolean(health.moss_reachable && health.moss_model_loaded);
+        setMossReady(ready);
+        setMossMessage(ready ? '' : !health.moss_reachable ? '转录服务未连接，请启动本机 MOSS' : health.moss_model_loading ? 'MOSS 模型加载中，请等待就绪' : health.moss_warmup_error || 'MOSS 转录模型尚未加载');
+      } catch {
+        if (active) { setMossReady(false); setMossMessage('无法检查转录服务，请确认本机 API 正常'); }
+      }
+    }
+    void checkMoss();
+    const timer = window.setInterval(checkMoss, 3000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [video.id]);
 
   useEffect(() => {
     const current = panel === 'summarize' ? summarizeJob : panel === 'transcribe' ? transcribeJob : null;
@@ -135,7 +168,7 @@ export default function ParsedVideoCard({
       const path = kind === 'transcribe' ? `/api/videos/${video.id}/transcribe` : `/api/videos/${video.id}/summary`;
       const created = await api<Job>(path, {
         method: 'POST',
-        body: JSON.stringify({ video_id: video.id, template_id: templateId, reuse_transcript: true }),
+        body: JSON.stringify({ video_id: video.id, template_id: templateId, reuse_transcript: true, transcription: { language } }),
       });
       if (created.job_type === 'summarize') setSummarizeJob(created);
       else setTranscribeJob(created);
@@ -147,11 +180,20 @@ export default function ParsedVideoCard({
     }
   }
 
-  function takeJob(job: Job | null) {
+  const takeJob = useCallback((job: Job | null) => {
     if (!job) return;
     if (job.job_type === 'summarize') setSummarizeJob(job);
     if (job.job_type === 'transcribe') setTranscribeJob(job);
-  }
+  }, []);
+
+  const handleResultState = useCallback(({ transcript, summary }: { transcript: boolean; summary: boolean }) => {
+    setHasTranscript((current) => current === transcript ? current : transcript);
+    setHasSummary((current) => current === summary ? current : summary);
+  }, []);
+
+  const handleSummaryReady = useCallback((ready: boolean) => {
+    setSummaryReady((current) => current === ready ? current : ready);
+  }, []);
 
   if (loading) {
     return (
@@ -183,7 +225,7 @@ export default function ParsedVideoCard({
         : undefined;
 
   return (
-    <section className={`result-card ${panel ? 'is-open' : ''} ${analyzeOpen ? 'is-summary' : ''} ${panel === 'download' ? 'is-download' : ''}`}>
+    <section id={id} className={`result-card ${panel ? 'is-open' : ''} ${analyzeOpen ? 'is-summary' : ''} ${panel === 'download' ? 'is-download' : ''}`}>
       <div className="result-side">
         <div className="result-cover">
           {video.thumbnail_url ? <img src={video.thumbnail_url} alt="视频封面" /> : (
@@ -202,14 +244,13 @@ export default function ParsedVideoCard({
               hasTranscript={hasTranscript}
               hasSummary={hasSummary}
               showLaunch={false}
+              preferredTemplateName={preferredTemplateName}
+              listedTemplates={meetingMode ? false : true}
               onToast={onToast}
               onJob={takeJob}
               onTemplateId={setTemplateId}
-              onSummaryReady={setSummaryReady}
-              onResultState={({ transcript, summary }) => {
-                setHasTranscript(transcript);
-                setHasSummary(summary);
-              }}
+              onSummaryReady={handleSummaryReady}
+              onResultState={handleResultState}
             />
           </div>
         </div>
@@ -221,8 +262,8 @@ export default function ParsedVideoCard({
             {platform?.name || video.platform || '待识别平台'}
           </span>
           <div className="result-top-right">
-            <span className={`status-text ${video.parse_status}`}>{video.parse_status === 'parsed' ? '解析完成' : '等待解析器接入'}</span>
-            <button type="button" className="text-button" onClick={() => { setTranscribeJob(null); setSummarizeJob(null); onReparse(); }}>重新解析</button>
+            <span className={`status-text ${video.parse_status}`}>{video.parse_status === 'uploaded' ? '文件已就绪' : video.parse_status === 'parsed' ? '解析完成' : '等待解析器接入'}</span>
+            {video.parse_status !== 'uploaded' && <button type="button" className="text-button" onClick={() => { setTranscribeJob(null); setSummarizeJob(null); onReparse(); }}>重新解析</button>}
           </div>
         </div>
         <h2>{video.title || '待获取视频标题'}</h2>
@@ -231,22 +272,26 @@ export default function ParsedVideoCard({
           <i />
           {formatDuration(video.duration_seconds)}
         </p>
-        {video.source_url && (
+        {video.source_url && video.parse_status !== 'uploaded' && (
           <a className="source-link" href={video.source_url} target="_blank" rel="noreferrer">
             {video.source_url}
           </a>
         )}
         <div className="result-actions">
-          <button type="button" className={panel === 'download' ? 'primary-button' : 'outline-button'} onClick={() => changePanel(panel === 'download' ? null : 'download')}>
-            视频下载
-          </button>
-          <button
-            type="button"
-            className={panel === 'transcribe' ? 'primary-button' : 'outline-button'}
-            onClick={() => switchAnalyze('transcribe')}
-          >
-            {transcribeRunning ? '转录中…' : '转录'}
-          </button>
+          {!meetingMode && (
+            <button type="button" className={panel === 'download' ? 'primary-button' : 'outline-button'} onClick={() => changePanel(panel === 'download' ? null : 'download')}>
+              视频下载
+            </button>
+          )}
+          {!meetingMode && (
+            <button
+              type="button"
+              className={panel === 'transcribe' ? 'primary-button' : 'outline-button'}
+              onClick={() => switchAnalyze('transcribe')}
+            >
+              {transcribeRunning ? '转录中…' : '转录'}
+            </button>
+          )}
           <button
             type="button"
             className={summaryReady ? (panel === 'summarize' ? 'primary-button' : 'outline-button') : 'muted-button'}
@@ -262,12 +307,13 @@ export default function ParsedVideoCard({
               <DownloadAction video={video} variants={variants} onToast={onToast} />
             </div>
             <div className={`result-panel ${panel === 'transcribe' ? 'is-active' : ''}`}>
+              <label className="transcription-language">转录语言<select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="zh">中文</option><option value="auto">自动识别</option><option value="en">英语</option></select></label>
               <SummaryProgress
                 job={transcribeJob}
                 startLabel="开始转录"
-                startHint={blockedHint}
+                startHint={blockedHint || mossMessage}
                 showStart={transcribeStart}
-                startDisabled={busy || transcribeRunning || summarizeRunning}
+                startDisabled={busy || transcribeRunning || summarizeRunning || !mossReady}
                 onStart={() => start('transcribe')}
               />
             </div>

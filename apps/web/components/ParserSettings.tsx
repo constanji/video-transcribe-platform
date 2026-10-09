@@ -128,6 +128,13 @@ export default function ParserSettings({
                   placeholder={item.cookies_masked || '选填'}
                 />
               </label>
+              {adapter.id === 'shipinhao' && (
+                <div className="shipinhao-guide">
+                  <strong>短链需要腾讯元宝 Cookie</strong>
+                  <p>点击右侧按钮打开元宝并登录，在浏览器开发者工具中复制 Cookie，粘贴到上方后保存。</p>
+                  <a className="outline-button" href="https://yuanbao.tencent.com" target="_blank" rel="noreferrer">打开腾讯元宝 ↗</a>
+                </div>
+              )}
               {adapter.id === 'bilibili' && (
                 <label className="adapter-field">
                   <span>

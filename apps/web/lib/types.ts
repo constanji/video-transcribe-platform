@@ -85,6 +85,64 @@ export type VideoAsset = {
   summaries?: Summary[];
 };
 
+export type UploadResponse = {
+  video: VideoAsset;
+  duplicate: boolean;
+};
+
+export type MeetingSegment = {
+  text?: string;
+  start_ms?: number;
+  end_ms?: number;
+  speaker?: string | null;
+  seq?: number;
+  is_partial?: boolean;
+};
+
+export type MeetingRecord = {
+  id: string;
+  title: string;
+  mode: 'live' | 'recording';
+  status: string;
+  language: string;
+  audio_source: string;
+  video_id?: string | null;
+  error_message?: string | null;
+  live_segments?: MeetingSegment[];
+  transcript?: Transcript | null;
+  summary?: Summary | null;
+  job?: Job | null;
+  video?: VideoAsset | null;
+  created_at: string;
+  updated_at: string;
+  ws_url?: string;
+};
+
+export type MeetingHistoryItem = {
+  id: string;
+  title: string;
+  status: string;
+  mode: 'live' | 'recording';
+  language: string;
+  duration_seconds?: number | null;
+  has_transcript: boolean;
+  has_summary: boolean;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ApiKeyRecord = {
+  id: string;
+  name: string;
+  prefix: string;
+  masked: string;
+  created_at: string;
+  last_used_at?: string | null;
+  key?: string;
+  hint?: string;
+};
+
 export type Template = {
   id: string;
   name: string;

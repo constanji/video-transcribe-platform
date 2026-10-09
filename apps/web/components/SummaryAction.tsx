@@ -22,6 +22,9 @@ export default function SummaryAction({
   hasTranscript = false,
   hasSummary = false,
   showLaunch = true,
+  showTranscribe = true,
+  preferredTemplateName,
+  listedTemplates = true,
   onToast,
   onJob,
   onTemplateId,
@@ -34,6 +37,9 @@ export default function SummaryAction({
   hasTranscript?: boolean;
   hasSummary?: boolean;
   showLaunch?: boolean;
+  showTranscribe?: boolean;
+  preferredTemplateName?: string;
+  listedTemplates?: boolean;
   onToast: (message: string, kind?: 'success' | 'error') => void;
   onJob?: (job: Job | null) => void;
   onTemplateId?: (id: string) => void;
@@ -64,9 +70,12 @@ export default function SummaryAction({
   }, [summaryDone, transcriptReady, onResultState]);
 
   useEffect(() => {
-    api<Template[]>('/api/templates?listed=true').then((items) => {
+    api<Template[]>(listedTemplates === false ? '/api/templates' : '/api/templates?listed=true').then((items) => {
       setTemplates(items);
-      const preferred = items.find((item) => item.name === '通用视频总结') || items.find((item) => item.name === '新闻热点') || items[0];
+      const preferred = items.find((item) => preferredTemplateName && item.name === preferredTemplateName)
+        || items.find((item) => item.name === '通用视频总结')
+        || items.find((item) => item.name === '新闻热点')
+        || items[0];
       const nextId = preferred?.id || '';
       setTemplateId(nextId);
       onTemplateId?.(nextId);
@@ -87,7 +96,7 @@ export default function SummaryAction({
         setSummaryDone(hasUsableSummary(item));
       }).catch(() => undefined);
     }
-  }, [videoId]);
+  }, [videoId, listedTemplates, preferredTemplateName]);
 
   useEffect(() => {
     setJob(initialJob || null);
@@ -178,9 +187,11 @@ export default function SummaryAction({
       </div>
       {showLaunch && (
         <div className="summary-actions">
-          <button type="button" className="outline-button" onClick={() => start('transcribe')} disabled={busy || running}>
-            {busy ? '创建中…' : running && job?.job_type === 'transcribe' ? '转录中…' : '转录'}
-          </button>
+          {showTranscribe && (
+            <button type="button" className="outline-button" onClick={() => start('transcribe')} disabled={busy || running}>
+              {busy ? '创建中…' : running && job?.job_type === 'transcribe' ? '转录中…' : '转录'}
+            </button>
+          )}
           <button
             type="button"
             className={summaryReady ? 'primary-button' : 'muted-button'}

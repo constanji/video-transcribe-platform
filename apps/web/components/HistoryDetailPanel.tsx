@@ -68,7 +68,7 @@ export default function HistoryDetailPanel({
       {tab === 'summary' && (
         <SummaryViewer summaries={video.summaries || []} templates={templates} onRetry={() => setShowSummary(true)} onToast={onToast} />
       )}
-      {tab === 'transcript' && <TranscriptViewer transcript={video.transcripts?.[0]} />}
+      {tab === 'transcript' && <TranscriptViewer transcript={video.transcripts?.[0]} onToast={onToast} />}
       {tab === 'timeline' && (
         <ol className="process-timeline">
           {STAGE_ORDER.map((stage) => {

@@ -19,7 +19,7 @@ function mossLabel(health: MossHealth | null) {
   return { text: '模型未加载', kind: 'warn' };
 }
 
-export default function TopBar({ active }: { active: 'workbench' | 'history' | 'settings' }) {
+export default function TopBar({ active }: { active: 'workbench' | 'upload' | 'history' | 'settings' }) {
   const [health, setHealth] = useState<MossHealth | null>(null);
   const state = mossLabel(health);
 
@@ -49,6 +49,7 @@ export default function TopBar({ active }: { active: 'workbench' | 'history' | '
       </a>
       <nav className="nav-tabs">
         <a className={active === 'workbench' ? 'active' : ''} href="/">工作台</a>
+        <a className={active === 'upload' ? 'active' : ''} href="/upload">会议纪要</a>
         <a className={active === 'history' ? 'active' : ''} href="/history">历史解析任务</a>
         <a className={active === 'settings' ? 'active' : ''} href="/settings">设置</a>
       </nav>

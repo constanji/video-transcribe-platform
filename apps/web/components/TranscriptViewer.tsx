@@ -22,7 +22,13 @@ function clock(ms: number) {
   return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
 }
 
-export default function TranscriptViewer({ transcript }: { transcript?: Transcript }) {
+export default function TranscriptViewer({
+  transcript,
+  onToast,
+}: {
+  transcript?: Transcript;
+  onToast?: (message: string, kind?: 'success' | 'error') => void;
+}) {
   const [query, setQuery] = useState('');
   const text = transcript?.text || '';
   const segments = useMemo(
@@ -35,7 +41,12 @@ export default function TranscriptViewer({ transcript }: { transcript?: Transcri
   }
 
   async function copy() {
-    await navigator.clipboard.writeText(text);
+    try {
+      await navigator.clipboard.writeText(text);
+      onToast?.('转录内容已复制');
+    } catch {
+      onToast?.('复制失败，请检查浏览器剪贴板权限', 'error');
+    }
   }
 
   function download(kind: 'txt' | 'md') {
