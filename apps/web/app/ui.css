@@ -99,6 +99,12 @@
 .copy-menu button{display:block;width:100%;border:0;border-radius:7px;background:transparent;padding:10px 12px;text-align:left;font-size:13px;color:#39485d;cursor:pointer}
 .copy-menu button:hover{background:#f2f6fb}
 .studio-summary-toolbar{justify-content:center}
+/* The summary toolbar holds four controls (generate, language, model, template)
+   and the two pickers can be wide, so let it wrap instead of overflowing, and
+   drop the joined segmented look since the group is no longer one line. */
+.studio-summary-toolbar{flex-wrap:wrap;height:auto;min-height:64px;padding:10px 18px;gap:8px}
+.studio-summary-toolbar .studio-tool{border-radius:10px}
+.studio-summary-toolbar .studio-tool+.studio-tool{margin-left:0}
 .studio-tool{height:42px;flex:none;border:1px solid #dce2ea;background:#fff;color:#344052;border-radius:0;padding:0 16px;font:inherit;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;gap:8px}
 .studio-tool svg{width:18px;height:18px;flex:none}
 .studio-tool:first-child{border-radius:12px 0 0 12px}
@@ -107,7 +113,9 @@
 .studio-tool.active{border-color:#bcd6f5;background:#f1f7ff;color:#186dc8;z-index:1}
 .studio-tool:disabled{cursor:not-allowed;opacity:.65}
 .studio-tool-select{padding-right:12px}
-.studio-tool-select select{border:0;background:transparent;font:inherit;font-size:14px;color:inherit;outline:0;cursor:pointer}
+.studio-tool-select select{border:0;background:transparent;font:inherit;font-size:14px;color:inherit;outline:0;cursor:pointer;max-width:200px}
+.studio-tool-select select:disabled{cursor:not-allowed}
+.studio-tool-select.muted-select{color:var(--muted)}
 .studio-turns,.studio-summary{flex:1;overflow:auto;padding:8px 0 24px}
 .studio-turn{display:grid;grid-template-columns:58px minmax(0,1fr);gap:10px;padding:11px 18px;align-items:start}
 .studio-turn time{font-size:12px;color:#9aa3af;font-variant-numeric:tabular-nums;padding-top:3px}

@@ -244,6 +244,8 @@ export default function SummaryAction({
           videoId={videoId}
           templateId={templateId}
           templateName={templates.find((item) => item.id === templateId)?.name}
+          templates={templates}
+          onTemplateChange={changeTemplate}
           summaryReady={summaryReady}
           activeJob={job}
           onJobChange={setJob}

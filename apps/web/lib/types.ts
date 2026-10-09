@@ -152,3 +152,16 @@ export type Template = {
   show_on_home?: boolean;
   can_delete?: boolean;
 };
+
+// The subset of the "transcription" settings group that the summary panel needs
+// so it can offer the model as a picker instead of linking to the settings page.
+export type SummarySettings = {
+  default_provider?: string;
+  summary_model?: string;
+  summary_model_path?: string;
+  summary_model_found?: boolean;
+  api_base_url?: string;
+  api_key_masked?: string;
+  default_language?: string;
+};
+

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../lib/api';
-import type { Job, Summary, Transcript, VideoAsset } from '../lib/types';
+import type { Job, Summary, SummarySettings, Template, Transcript, VideoAsset } from '../lib/types';
 import { cleanSummaryMarkdown } from '../lib/summary-text';
 
 function Icon({ d, label }: { d: string; label?: string }) {
@@ -31,24 +31,31 @@ export default function TranscriptStudio({
   videoId,
   templateId,
   templateName,
+  templates = [],
   summaryReady,
   activeJob,
   onClose,
   onToast,
   onJobChange,
+  onTemplateChange,
 }: {
   videoId: string;
   templateId: string;
   templateName?: string;
+  templates?: Template[];
   summaryReady: boolean;
   activeJob?: Job | null;
   onClose: () => void;
   onToast: (message: string, kind?: 'success' | 'error') => void;
   onJobChange?: (job: Job) => void;
+  onTemplateChange?: (id: string) => void;
 }) {
   const [video, setVideo] = useState<VideoAsset | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
+  const [settings, setSettings] = useState<SummarySettings | null>(null);
+  const [savingModel, setSavingModel] = useState(false);
+  const [activeTemplateId, setActiveTemplateId] = useState(templateId);
 
   async function load() {
     const next = await api<VideoAsset>(`/api/videos/${videoId}`);
@@ -59,6 +66,18 @@ export default function TranscriptStudio({
   useEffect(() => {
     load().catch((err) => onToast((err as Error).message, 'error'));
   }, [videoId]);
+
+  // The summary model lives in the global settings; read it so the picker can
+  // show what is actually configured instead of sending the user to /settings.
+  useEffect(() => {
+    api<SummarySettings>('/api/settings/transcription')
+      .then(setSettings)
+      .catch(() => setSettings(null));
+  }, []);
+
+  useEffect(() => {
+    setActiveTemplateId(templateId);
+  }, [templateId]);
 
   useEffect(() => {
     if (activeJob?.job_type === 'summarize') setJob(activeJob);
@@ -121,16 +140,71 @@ export default function TranscriptStudio({
     onToast(withSpeaker ? '已复制转录（带说话人）' : '已复制转录内容');
   }
 
+  // The model picker mirrors the provider list from the settings page, but the
+  // choice is written straight through so a summary can be re-run without
+  // leaving the dialog. `summary_model` is the model name for local and remote.
+  const provider = settings?.default_provider || 'local';
+  const modelName = settings?.summary_model || '';
+  const hasRemoteBase = Boolean(settings?.api_base_url);
+  const modelReady = settings
+    ? provider === 'local'
+      ? Boolean(settings.summary_model_found)
+      : hasRemoteBase
+    : summaryReady;
+  const modelOptions = [
+    {
+      value: 'local',
+      label: modelName ? `内置本地模型 · ${modelName}` : '内置本地模型',
+      usable: Boolean(settings?.summary_model_found),
+    },
+    {
+      value: 'ollama',
+      label: modelName ? `Ollama · ${modelName}` : 'Ollama',
+      usable: hasRemoteBase,
+    },
+    {
+      value: 'openai',
+      label: modelName ? `OpenAI 兼容 API · ${modelName}` : 'OpenAI 兼容 API',
+      usable: hasRemoteBase,
+    },
+  ];
+
+  async function changeModel(nextProvider: string) {
+    if (!settings || nextProvider === provider || savingModel) return;
+    const previous = settings;
+    setSavingModel(true);
+    setSettings({ ...settings, default_provider: nextProvider });
+    try {
+      const updated = await api<SummarySettings>('/api/settings/transcription', {
+        method: 'PUT',
+        body: JSON.stringify({ default_provider: nextProvider }),
+      });
+      setSettings(updated);
+      const label = modelOptions.find((item) => item.value === nextProvider)?.label || nextProvider;
+      onToast(`总结模型已切换为 ${label}（全局设置，下次生成生效）`);
+    } catch (err) {
+      setSettings(previous);
+      onToast((err as Error).message, 'error');
+    } finally {
+      setSavingModel(false);
+    }
+  }
+
+  function changeTemplate(id: string) {
+    setActiveTemplateId(id);
+    onTemplateChange?.(id);
+  }
+
   async function generate() {
-    if (!summaryReady) {
-      window.location.href = '/settings?tab=transcription';
+    if (!modelReady) {
+      onToast('当前总结模型不可用，请在上方「AI 模型」里切换，或到设置页完成配置', 'error');
       return;
     }
     setBusy(true);
     try {
       const created = await api<Job>(`/api/videos/${videoId}/summaries`, {
         method: 'POST',
-        body: JSON.stringify({ template_id: templateId }),
+        body: JSON.stringify({ template_id: activeTemplateId }),
       });
       setJob(created);
       onJobChange?.(created);
@@ -188,8 +262,8 @@ export default function TranscriptStudio({
             <div className="studio-pane-toolbar studio-summary-toolbar">
               <button
                 type="button"
-                className={summaryReady ? 'studio-tool active' : 'studio-tool muted-button'}
-                data-tip={summaryReady ? undefined : '未配置总结模型'}
+                className={modelReady ? 'studio-tool active' : 'studio-tool muted-button'}
+                data-tip={modelReady ? undefined : '未配置总结模型'}
                 onClick={generate}
                 disabled={busy || generating || !transcript}
               >
@@ -202,19 +276,41 @@ export default function TranscriptStudio({
                   <option value="zh-CN">简体中文</option>
                 </select>
               </label>
-              <button
-                type="button"
-                className="studio-tool"
-                title="配置总结模型"
-                onClick={() => { window.location.href = '/settings?tab=transcription'; }}
+              <label
+                className={`studio-tool studio-tool-select${modelReady ? '' : ' muted-select'}`}
+                title={modelReady ? '选择总结模型' : '当前模型不可用，请切换或到设置页完成配置'}
               >
                 <Icon d="M12 2a4 4 0 014 4v1h1a3 3 0 013 3v2h-2v5a3 3 0 01-3 3H9a3 3 0 01-3-3v-5H4V10a3 3 0 013-3h1V6a4 4 0 014-4zm-1 14v3h2v-3h-2zm0-8v6h2V8h-2z" />
-                AI 模型
-              </button>
-              <button type="button" className="studio-tool" title={templateName || '当前总结模板'}>
+                <select
+                  value={provider}
+                  aria-label="总结模型"
+                  disabled={!settings || savingModel}
+                  onChange={(event) => changeModel(event.target.value)}
+                >
+                  {modelOptions.map((item) => (
+                    <option key={item.value} value={item.value} disabled={!item.usable}>
+                      {item.usable ? item.label : `${item.label}（未配置）`}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="studio-tool studio-tool-select" title={templateName || '选择总结模板'}>
                 <Icon d="M6 2h9l5 5v13a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm8 1.5V8h4.5L14 3.5zM8 12h8v2H8v-2zm0 4h8v2H8v-2z" />
-                模板
-              </button>
+                <select
+                  value={activeTemplateId}
+                  aria-label="总结模板"
+                  disabled={!templates.length}
+                  onChange={(event) => changeTemplate(event.target.value)}
+                >
+                  {!templates.length && <option value="">暂无可用模板</option>}
+                  {activeTemplateId && !templates.some((item) => item.id === activeTemplateId) && (
+                    <option value={activeTemplateId}>{templateName || '当前模板'}</option>
+                  )}
+                  {templates.map((item) => (
+                    <option key={item.id} value={item.id}>{item.name}</option>
+                  ))}
+                </select>
+              </label>
             </div>
             {generating ? (
               <div className="studio-empty studio-processing">
@@ -240,8 +336,8 @@ export default function TranscriptStudio({
               <p>模型内部过程已过滤。请重新生成摘要。</p>
               <button
                 type="button"
-                className={summaryReady ? 'primary-button' : 'muted-button'}
-                data-tip={summaryReady ? undefined : '未配置总结模型'}
+                className={modelReady ? 'primary-button' : 'muted-button'}
+                data-tip={modelReady ? undefined : '未配置总结模型'}
                 onClick={generate}
                 disabled={busy || generating || !transcript}
               >
@@ -255,8 +351,8 @@ export default function TranscriptStudio({
               <p>根据会议转录生成摘要，提取要点、行动项和结论。</p>
               <button
                 type="button"
-                className={summaryReady ? 'primary-button' : 'muted-button'}
-                data-tip={summaryReady ? undefined : '未配置总结模型'}
+                className={modelReady ? 'primary-button' : 'muted-button'}
+                data-tip={modelReady ? undefined : '未配置总结模型'}
                 onClick={generate}
                 disabled={busy || generating || !transcript}
               >
