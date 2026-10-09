@@ -24,8 +24,10 @@ services:
       SUMMARY_MODEL_PATH: /models/summary/Qwen3.5-4B-Q4_K_M.gguf
     volumes:
       - media_storage:/data
-      - "${HOME}/Library/Application Support/com.meetily.ai/funasr-models:/models/moss:ro"
-      - "${HOME}/Library/Application Support/com.meetily.ai/models/summary:/models/summary:ro"
+      # 仓库内自带的模型目录同时提供 moss 与 summary 两个模型：
+      #   <ASSET_ROOT>/moss/OpenMOSS-Team/MOSS-Transcribe-Diarize
+      #   <ASSET_ROOT>/summary/Qwen3.5-4B-Q4_K_M.gguf
+      - "${ASSET_ROOT:-../deployment-assets/models}:/models:ro"
     ports: ["8000:8000"]
     depends_on:
       postgres:
@@ -36,10 +38,14 @@ services:
     build: {context: .., dockerfile: deploy/moss.Dockerfile}
     environment:
       MOSS_MODEL_PATH: /models/moss/OpenMOSS-Team/MOSS-Transcribe-Diarize
+      # 本地总结由本服务用 llama-cli 加载这个 GGUF 完成，所以这两个变量必须给到
+      # moss（只给 api 是不够的：api 只是把请求转发过来）。
+      SUMMARY_MODEL_PATH: /models/summary/Qwen3.5-4B-Q4_K_M.gguf
+      LLAMA_CLI: /usr/local/bin/llama-cli
       MOSS_PRELOAD: "1"
     ports: ["127.0.0.1:9001:9000"]
     volumes:
-      - "${HOME}/Library/Application Support/com.meetily.ai/funasr-models:/models/moss:ro"
+      - "${ASSET_ROOT:-../deployment-assets/models}:/models:ro"
       - media_storage:/data:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=3)"]
