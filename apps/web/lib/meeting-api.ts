@@ -18,6 +18,10 @@ export function getMeeting(id: string) {
   return api<MeetingRecord>(`/api/v1/meetings/${id}`);
 }
 
+export function deleteMeeting(id: string) {
+  return api<{ deleted: string }>(`/api/v1/meetings/${id}`, { method: 'DELETE' });
+}
+
 export function stopMeeting(id: string) {
   return api<MeetingRecord>(`/api/v1/meetings/${id}/stop`, { method: 'POST' });
 }

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import threading
 import time
 from datetime import datetime, timezone
@@ -605,6 +606,33 @@ def retry_transcribe(meeting_id: str, request: Request, session: Session = Depen
     payload = meeting_dict(session, meeting)
     payload["job"] = job_dict(job)
     return payload
+
+
+@router.delete("/api/v1/meetings/{meeting_id}")
+def delete_meeting(meeting_id: str, request: Request, session: Session = Depends(get_db), _auth=Depends(meeting_auth)):
+    """删除会议及其绑定的视频资产（转录/纪要/媒体文件同属这场会议）。"""
+    from .main import MEETING_DIR, MediaVariant, ProcessingJob, Summary, Transcript, VideoAsset, _has_active_job
+
+    meeting = get_meeting_or_404(session, meeting_id)
+    if _has_active_job(session, meeting.video_asset_id):
+        raise HTTPException(409, "转录任务仍在运行，请完成或取消后再删除")
+    video = session.get(VideoAsset, meeting.video_asset_id) if meeting.video_asset_id else None
+    if video is not None:
+        video_id = video.id
+        session.query(ProcessingJob).filter(ProcessingJob.video_asset_id == video_id).delete(synchronize_session=False)
+        session.query(Transcript).filter(Transcript.video_asset_id == video_id).delete(synchronize_session=False)
+        session.query(Summary).filter(Summary.video_asset_id == video_id).delete(synchronize_session=False)
+        for variant in session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video_id)).all():
+            if variant.local_path:
+                Path(variant.local_path).unlink(missing_ok=True)
+            session.delete(variant)
+        session.delete(video)
+    folder = MEETING_DIR / meeting.id
+    if folder.exists():
+        shutil.rmtree(folder, ignore_errors=True)
+    session.delete(meeting)
+    session.commit()
+    return {"deleted": meeting_id}
 
 
 @router.post("/api/v1/meetings/{meeting_id}/summaries")

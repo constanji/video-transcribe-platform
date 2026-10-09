@@ -35,17 +35,12 @@ function timeLabel(value?: string | null) {
 export default function RecentMeetingGrid({
   meetings,
   onOpen,
+  onDelete,
 }: {
   meetings: MeetingHistoryItem[];
   onOpen?: (item: MeetingHistoryItem) => void;
+  onDelete?: (item: MeetingHistoryItem) => void;
 }) {
-  // 有 video_id 的会议直接打开结果面板（转录+纪要工作室）；
-  // 老数据没有绑定视频资产时，降级跳历史页的会议详情。
-  function open(item: MeetingHistoryItem) {
-    if (item.video_id && onOpen) onOpen(item);
-    else window.location.href = `/history?tab=meeting&meeting=${item.id}`;
-  }
-
   return (
     <section className="library-panel recent-panel">
       <div className="section-title">
@@ -62,21 +57,22 @@ export default function RecentMeetingGrid({
         <div className="recent-grid">
           {meetings.map((item) => {
             const duration = formatDuration(item.duration_seconds);
+            const deepLink = `/history?tab=meeting&meeting=${item.id}`;
+            const openItem = () => {
+              if (item.video_id && onOpen) onOpen(item);
+              else window.location.href = deepLink;
+            };
             return (
-              <a
+              <article
                 className="recent-card meeting-recent-card"
                 key={item.id}
-                href={`/history?tab=meeting&meeting=${item.id}`}
-                onClick={(event) => {
-                  if (item.video_id && onOpen) {
-                    event.preventDefault();
-                    open(item);
-                  }
-                }}
+                role="button"
+                tabIndex={0}
+                onClick={openItem}
                 onKeyDown={(event) => {
-                  if ((event.key === 'Enter' || event.key === ' ') && item.video_id && onOpen) {
+                  if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault();
-                    open(item);
+                    openItem();
                   }
                 }}
                 aria-label={`打开会议「${item.title}」的结果面板`}
@@ -85,6 +81,18 @@ export default function RecentMeetingGrid({
                   <span>◉</span>
                   {item.status === 'recording' && <em className="meeting-cover-badge live">录音中</em>}
                   {(item.status === 'processing' || item.status === 'summarizing') && <em className="meeting-cover-badge busy">转录中</em>}
+                  {onDelete && (
+                    <button
+                      type="button"
+                      className="recent-delete"
+                      aria-label={`删除会议「${item.title}」`}
+                      title="删除会议记录"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onDelete(item);
+                      }}
+                    >×</button>
+                  )}
                 </div>
                 <h3>{item.title}</h3>
                 <p>{MODE_LABEL[item.mode] || item.mode}{duration ? ` · ${duration}` : ''}</p>
@@ -94,7 +102,7 @@ export default function RecentMeetingGrid({
                   <span>{item.has_transcript ? '已有转录' : '无转录'}</span>
                   <span>{item.has_summary ? '已有纪要' : '无纪要'}</span>
                 </p>
-              </a>
+              </article>
             );
           })}
         </div>

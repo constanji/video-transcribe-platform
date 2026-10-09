@@ -699,6 +699,10 @@ export default function MeetingWorkbench({
               <span className="live-status paused">已暂停</span>
             ) : (busyHint || lagSec > 5) ? (
               <span className="live-status">{busyHint || `转写滞后 ≈ ${lagSec}s`}</span>
+            ) : recording ? (
+              // MOSS 在 CPU 上按块转写（16s 块约需 14s），说完等十几秒才出字是正常速度，
+              // 不明说会被当成「不实时」的故障。
+              <span className="live-status is-hint">CPU 转写 · 字幕滞后约 10~20 秒</span>
             ) : null}
           </div>
           <div className="live-transcript-list" ref={listRef}>

@@ -7,7 +7,7 @@ import Toast from '../components/Toast';
 import TopBar from '../components/TopBar';
 import TranscriptStudio from '../components/TranscriptStudio';
 import { api } from '../lib/api';
-import { listMeetings } from '../lib/meeting-api';
+import { deleteMeeting, listMeetings } from '../lib/meeting-api';
 import type { MeetingHistoryItem, Platform, SummarySettings, Template } from '../lib/types';
 
 const MEETINGS_POLL_MS = 15000;
@@ -60,6 +60,24 @@ export default function MeetingHomePage() {
     }).catch(() => setSummaryReady(false));
   }, []);
 
+  // 轮询刷新会整体覆盖 meetings，删除走乐观更新：先移除再调接口，失败提示并恢复。
+  async function removeMeeting(item: MeetingHistoryItem) {
+    if (!window.confirm(`确定删除「${item.title}」吗？会议录音、转录和纪要会一并删除。`)) return;
+    const previous = meetings;
+    setMeetings((current) => current.filter((entry) => entry.id !== item.id));
+    if (studioMeetingId === item.id) {
+      setStudioVideoId(null);
+      setStudioMeetingId(null);
+    }
+    try {
+      await deleteMeeting(item.id);
+      setToast({ message: '已删除会议记录', kind: 'success' });
+    } catch (err) {
+      setMeetings(previous);
+      setToast({ message: (err as Error).message, kind: 'error' });
+    }
+  }
+
   return (
     <main className="page-shell upload-page">
       <TopBar active="meeting" />
@@ -78,6 +96,7 @@ export default function MeetingHomePage() {
           setStudioVideoId(item.video_id || null);
           setStudioMeetingId(item.id);
         }}
+        onDelete={removeMeeting}
       />
       {studioVideoId && (
         <TranscriptStudio
