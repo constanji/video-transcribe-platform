@@ -12,7 +12,8 @@ import { api } from '../../lib/api';
 import type { MeetingHistoryItem, Platform, Template, VideoAsset } from '../../lib/types';
 
 export default function HistoryPage() {
-  const [tab, setTab] = useState<'video' | 'meeting'>(() => (new URLSearchParams(window.location.search).get('tab') === 'meeting' ? 'meeting' : 'video'));
+  // 初始值必须 SSR 安全（window 在服务端预渲染时不存在）；URL 参数在挂载后读取。
+  const [tab, setTab] = useState<'video' | 'meeting'>('video');
   const [items, setItems] = useState<VideoAsset[]>([]);
   const [meetings, setMeetings] = useState<MeetingHistoryItem[]>([]);
   const [selectedMeeting, setSelectedMeeting] = useState<MeetingHistoryItem>();
@@ -60,6 +61,8 @@ export default function HistoryPage() {
   }
 
   useEffect(() => {
+    // ?tab=meeting 深链：hydration 完成后再切 tab，避免 SSR/客户端首帧不一致。
+    if (new URLSearchParams(window.location.search).get('tab') === 'meeting') setTab('meeting');
     api<Platform[]>('/api/platforms').then(setPlatforms).catch(() => []);
     api<Template[]>('/api/templates').then(setTemplates).catch(() => []);
     load().catch(() => setItems([]));
