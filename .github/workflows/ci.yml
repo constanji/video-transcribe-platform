@@ -1,0 +1,146 @@
+name: CI
+
+# Continuous integration only. Deployment is deliberately NOT done from a
+# hosted runner: the target host is an internal address (10.0.0.32) that
+# GitHub cannot reach inbound, and neither side can rely on GitHub being
+# reachable outbound either. Releases are driven from a machine that can SSH
+# to the host, with deployment-assets/server/release.sh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  api:
+    name: api (python 3.11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # `pip install .` cannot be used here. This repo uses a flat layout with
+      # several top-level directories, so setuptools' auto-discovery aborts
+      # with "Multiple top-level packages discovered in a flat-layout". The
+      # Docker build only gets away with it because it copies pyproject.toml
+      # into an empty directory before installing.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python - <<'PY'
+          import subprocess, sys, tomllib
+
+          deps = tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]
+          subprocess.check_call([sys.executable, "-m", "pip", "install", *deps])
+          PY
+
+      - name: Byte-compile
+        run: python -m compileall -q apps services
+
+      # Assert on the OpenAPI schema rather than app.routes: FastAPI wraps an
+      # included router in a single _IncludedRouter entry, so the individual
+      # paths of apps/api/meetings.py never show up in app.routes directly.
+      - name: Import smoke test
+        env:
+          DATABASE_URL: postgresql+psycopg://media:media@127.0.0.1:5432/media_platform
+          API_SECRET: ci-only-secret
+          COOKIE_ENCRYPTION_KEY: ci-only-cookie-key
+        run: |
+          python - <<'PY'
+          from apps.api.main import app
+
+          paths = set(app.openapi()["paths"])
+          required = {
+              "/api/system/health",
+              "/api/uploads",
+              "/api/videos",
+              "/api/v1/meetings",
+              "/api/v1/api-keys",
+          }
+          missing = sorted(required - paths)
+          assert not missing, f"routes missing from the OpenAPI schema: {missing}"
+          print(f"OK: {len(paths)} paths registered")
+          PY
+
+  web:
+    name: web (node 20)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # NEXT_PUBLIC_API_URL is inlined at build time, so it must be set here
+      # as well as in the image build.
+      - name: Build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+        run: npm run build
+
+  deployment:
+    name: deployment descriptors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell script syntax
+        run: |
+          set -e
+          for f in deployment-assets/server/*.sh services/moss-transcriber/run_local.sh; do
+            bash -n "$f"
+            echo "ok  $f"
+          done
+
+      - name: Compose configuration resolves
+        run: |
+          set -e
+          cp deployment-assets/server/deploy.env.example deployment-assets/server/deploy.env
+          docker compose --env-file deployment-assets/server/deploy.env \
+            -f deployment-assets/server/docker-compose.yml config -q
+          rm -f deployment-assets/server/deploy.env
+          echo "ok: compose resolves with the example env"
+
+      # The multi-GB models and built image tarballs live next to the code, so
+      # a broken .gitignore must fail CI rather than quietly bloat history.
+      - name: Guard against tracked secrets, payloads and large files
+        run: |
+          set -e
+          fail=0
+          if git ls-files | grep -E 'deployment-assets/(images|models)/' | grep -v '\.gitkeep$'; then
+            echo "::error::large deploy payloads are tracked"; fail=1
+          fi
+          if git ls-files | grep -E '(^|/)\.env$|(^|/)deploy\.env$|\.remote\.env$|(^|/)\.venv/'; then
+            echo "::error::secret or local-env files are tracked"; fail=1
+          fi
+          big="$(git ls-files -z | xargs -0 du -k 2>/dev/null | awk '$1 > 5120 {print $1 " KB  " $2}')"
+          if [ -n "$big" ]; then
+            echo "::error::tracked files larger than 5 MB:"
+            echo "$big"
+            fail=1
+          fi
+          if [ "$fail" != 0 ]; then exit 1; fi
+          echo "ok: no payloads, secrets or oversized files are tracked"
