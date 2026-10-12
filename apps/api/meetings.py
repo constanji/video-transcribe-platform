@@ -98,7 +98,7 @@ def require_meeting_key(
     session: Session,
     raw_key: str,
 ) -> Any | None:
-    from .main import ApiKey
+    from .main import ApiKey, User
 
     keys = list(session.scalars(select(ApiKey).where(ApiKey.revoked.is_(False))).all())
     if raw_key:
@@ -109,11 +109,13 @@ def require_meeting_key(
         match.last_used_at = _now()
         session.commit()
         return match
-    if not keys:
+    # 过渡期放行：系统既没有任何 API Key、也没有任何用户（全新库首次启动）。
+    if not keys and session.scalar(select(User.id).limit(1)) is None:
         return None
-    if is_local_browser(request):
+    # 本地开发放行：必须显式设置 AUTH_LOCAL_BYPASS=1（服务器不设即关）。
+    if os.getenv("AUTH_LOCAL_BYPASS") == "1" and is_local_browser(request):
         return None
-    raise HTTPException(401, "请提供 API Key（Authorization: Bearer 或 X-API-Key）")
+    raise HTTPException(401, "请提供 API Key 或登录（Authorization: Bearer 或 X-API-Key）")
 
 
 def get_meeting_or_404(session: Session, meeting_id: str):
@@ -142,6 +144,7 @@ def ensure_meeting_video(session: Session, meeting) -> Any:
         author="会议纪要",
         parse_status="uploaded",
         last_processed_at=_now(),
+        user_id=meeting.user_id,
     )
     session.add(video)
     session.flush()
@@ -430,19 +433,60 @@ def meeting_auth(
     session: Session = Depends(get_db),
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    token: str | None = Query(default=None),
 ):
-    raw = extract_api_key(authorization, x_api_key)
-    return require_meeting_key(request, session, raw)
+    """双通道认证：先 JWT（Bearer header 或 ?token=），再 ApiKey，最后过渡期放行。
+
+    返回 (kind, principal)：('user', User) / ('api_key', ApiKey) / ('anon', None)。
+    """
+    from .auth import resolve_principal
+
+    if not authorization and token:
+        authorization = f"Bearer {token}"
+    return resolve_principal(request, session, authorization, x_api_key)
+
+
+def _principal_user(session: Session, kind: str, principal: Any) -> Any | None:
+    """把认证结果折算成用户：api_key 取其归属者；anon（过渡期）返回 None 表示不限。"""
+    if kind == "user":
+        return principal
+    if kind == "api_key" and getattr(principal, "user_id", None):
+        from .main import User
+
+        return session.get(User, principal.user_id)
+    return None
+
+
+def _meeting_scope(session: Session, auth: tuple[str, Any]) -> list:
+    """会议数据隔离：admin 全见；普通用户（含 API Key 归属者）只看自己；anon 过渡期全见。"""
+    from .main import Meeting
+
+    user = _principal_user(session, *auth)
+    if user is None or user.role == "admin":
+        return []
+    return [Meeting.user_id == user.id]
+
+
+def get_owned_meeting(session: Session, auth: tuple[str, Any], meeting_id: str):
+    """取会议并校验归属；不存在或越权一律 404（不暴露存在性）。"""
+    from .main import Meeting
+
+    meeting = session.get(Meeting, meeting_id)
+    user = _principal_user(session, *auth)
+    if meeting is None or (user is not None and user.role != "admin" and meeting.user_id != user.id):
+        raise HTTPException(404, "会议不存在")
+    return meeting
 
 
 @router.post("/api/v1/meetings")
-def create_meeting(payload: CreateMeetingRequest, request: Request, session: Session = Depends(get_db), _auth=Depends(meeting_auth)):
+def create_meeting(payload: CreateMeetingRequest, request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
     from .main import Meeting
 
     language = payload.language or "zh"
     if language not in {"zh", "auto", "en"}:
         raise HTTPException(400, "不支持的转录语言")
     stamp = _now().strftime("会议 %Y-%m-%d %H:%M")
+    owner = _principal_user(session, *auth)
     meeting = Meeting(
         title=(payload.title or "").strip() or stamp,
         mode=payload.mode,
@@ -450,6 +494,7 @@ def create_meeting(payload: CreateMeetingRequest, request: Request, session: Ses
         audio_source=payload.audio_source,
         status="created",
         live_segments_json=[],
+        user_id=owner.id if owner else None,
     )
     session.add(meeting)
     session.flush()
@@ -459,10 +504,10 @@ def create_meeting(payload: CreateMeetingRequest, request: Request, session: Ses
 
 
 @router.get("/api/v1/meetings")
-def list_meetings(request: Request, session: Session = Depends(get_db), _auth=Depends(meeting_auth)):
+def list_meetings(request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
     from .main import Meeting, Summary, VideoAsset, _latest_transcript
 
-    meetings = session.scalars(select(Meeting).order_by(Meeting.updated_at.desc())).all()
+    meetings = session.scalars(select(Meeting).where(*_meeting_scope(session, auth)).order_by(Meeting.updated_at.desc())).all()
     items: list[dict[str, Any]] = []
     for meeting in meetings:
         video = session.get(VideoAsset, meeting.video_asset_id) if meeting.video_asset_id else None
@@ -500,8 +545,8 @@ def list_meetings(request: Request, session: Session = Depends(get_db), _auth=De
 
 
 @router.get("/api/v1/meetings/{meeting_id}")
-def get_meeting(meeting_id: str, request: Request, session: Session = Depends(get_db), _auth=Depends(meeting_auth)):
-    meeting = get_meeting_or_404(session, meeting_id)
+def get_meeting(meeting_id: str, request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
+    meeting = get_owned_meeting(session, auth, meeting_id)
     return meeting_dict(session, meeting)
 
 
@@ -512,11 +557,11 @@ async def upload_meeting_audio(
     file: UploadFile = File(...),
     transcribe: bool = Query(True),
     session: Session = Depends(get_db),
-    _auth=Depends(meeting_auth),
+    auth=Depends(meeting_auth),
 ):
     from .main import MEETING_DIR, MediaVariant, _uploaded_media_info, job_dict
 
-    meeting = get_meeting_or_404(session, meeting_id)
+    meeting = get_owned_meeting(session, auth, meeting_id)
     original_name = Path((file.filename or "recording.webm").replace("\\", "/")).name
     extension = Path(original_name).suffix.lower() or ".webm"
     media_type = MEETING_FORMATS.get(extension)
@@ -569,8 +614,8 @@ async def upload_meeting_audio(
 
 
 @router.post("/api/v1/meetings/{meeting_id}/stop")
-def stop_meeting(meeting_id: str, request: Request, session: Session = Depends(get_db), _auth=Depends(meeting_auth)):
-    meeting = get_meeting_or_404(session, meeting_id)
+def stop_meeting(meeting_id: str, request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
+    meeting = get_owned_meeting(session, auth, meeting_id)
     if meeting.status == "ready":
         return meeting_dict(session, meeting)
     if meeting.audio_path and Path(meeting.audio_path).exists():
@@ -584,11 +629,11 @@ def stop_meeting(meeting_id: str, request: Request, session: Session = Depends(g
 
 
 @router.post("/api/v1/meetings/{meeting_id}/retry-transcribe")
-def retry_transcribe(meeting_id: str, request: Request, session: Session = Depends(get_db), _auth=Depends(meeting_auth)):
+def retry_transcribe(meeting_id: str, request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
     """重跑终稿转录：供任务失败/中断后由前端重试，不必重录。"""
     from .main import MediaVariant, _has_active_job, job_dict
 
-    meeting = get_meeting_or_404(session, meeting_id)
+    meeting = get_owned_meeting(session, auth, meeting_id)
     if _has_active_job(session, meeting.video_asset_id):
         raise HTTPException(409, "终稿转录正在进行中")
     has_audio = bool(meeting.audio_path and Path(meeting.audio_path).exists())
@@ -609,11 +654,11 @@ def retry_transcribe(meeting_id: str, request: Request, session: Session = Depen
 
 
 @router.delete("/api/v1/meetings/{meeting_id}")
-def delete_meeting(meeting_id: str, request: Request, session: Session = Depends(get_db), _auth=Depends(meeting_auth)):
+def delete_meeting(meeting_id: str, request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
     """删除会议及其绑定的视频资产（转录/纪要/媒体文件同属这场会议）。"""
     from .main import MEETING_DIR, MediaVariant, ProcessingJob, Summary, Transcript, VideoAsset, _has_active_job
 
-    meeting = get_meeting_or_404(session, meeting_id)
+    meeting = get_owned_meeting(session, auth, meeting_id)
     if _has_active_job(session, meeting.video_asset_id):
         raise HTTPException(409, "转录任务仍在运行，请完成或取消后再删除")
     video = session.get(VideoAsset, meeting.video_asset_id) if meeting.video_asset_id else None
@@ -636,10 +681,10 @@ def delete_meeting(meeting_id: str, request: Request, session: Session = Depends
 
 
 @router.post("/api/v1/meetings/{meeting_id}/summaries")
-def summarize_meeting(meeting_id: str, payload: SummaryMeetingRequest | None = None, request: Request = None, session: Session = Depends(get_db), _auth=Depends(meeting_auth)):
+def summarize_meeting(meeting_id: str, payload: SummaryMeetingRequest | None = None, request: Request = None, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
     from .main import job_dict
 
-    meeting = get_meeting_or_404(session, meeting_id)
+    meeting = get_owned_meeting(session, auth, meeting_id)
     body = payload or SummaryMeetingRequest()
     job = start_summary(session, meeting, body.template_id)
     session.refresh(meeting)
@@ -649,10 +694,14 @@ def summarize_meeting(meeting_id: str, payload: SummaryMeetingRequest | None = N
 
 
 @router.get("/api/v1/api-keys")
-def list_api_keys(request: Request, session: Session = Depends(get_db), _auth=Depends(meeting_auth)):
+def list_api_keys(request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
     from .main import ApiKey
 
-    items = session.scalars(select(ApiKey).where(ApiKey.revoked.is_(False)).order_by(ApiKey.created_at.desc())).all()
+    owner = _principal_user(session, *auth)
+    query = select(ApiKey).where(ApiKey.revoked.is_(False))
+    if owner is not None and owner.role != "admin":
+        query = query.where(ApiKey.user_id == owner.id)
+    items = session.scalars(query.order_by(ApiKey.created_at.desc())).all()
     return [
         {
             "id": item.id,
@@ -667,14 +716,16 @@ def list_api_keys(request: Request, session: Session = Depends(get_db), _auth=De
 
 
 @router.post("/api/v1/api-keys")
-def create_api_key(payload: CreateApiKeyRequest, request: Request, session: Session = Depends(get_db), _auth=Depends(meeting_auth)):
+def create_api_key(payload: CreateApiKeyRequest, request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
     from .main import ApiKey
 
     plaintext = f"mk_{secrets.token_urlsafe(24)}"
+    owner = _principal_user(session, *auth)
     item = ApiKey(
         name=(payload.name or "").strip() or "会议纪要 API Key",
         prefix=plaintext[:12],
         hashed=hash_api_key(plaintext),
+        user_id=owner.id if owner else None,
     )
     session.add(item)
     session.commit()
@@ -691,11 +742,14 @@ def create_api_key(payload: CreateApiKeyRequest, request: Request, session: Sess
 
 
 @router.delete("/api/v1/api-keys/{key_id}")
-def revoke_api_key(key_id: str, request: Request, session: Session = Depends(get_db), _auth=Depends(meeting_auth)):
+def revoke_api_key(key_id: str, request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
     from .main import ApiKey
 
+    owner = _principal_user(session, *auth)
     item = session.get(ApiKey, key_id)
     if not item or item.revoked:
+        raise HTTPException(404, "密钥不存在")
+    if owner is not None and owner.role != "admin" and item.user_id != owner.id:
         raise HTTPException(404, "密钥不存在")
     item.revoked = True
     session.commit()
@@ -703,7 +757,8 @@ def revoke_api_key(key_id: str, request: Request, session: Session = Depends(get
 
 
 @router.websocket("/api/v1/meetings/{meeting_id}/live")
-async def live_meeting(websocket: WebSocket, meeting_id: str, api_key: str | None = Query(default=None)):
+async def live_meeting(websocket: WebSocket, meeting_id: str, api_key: str | None = Query(default=None), token: str | None = Query(default=None)):
+    from .auth import resolve_principal
     from .main import Meeting, SessionLocal
 
     await websocket.accept()
@@ -713,12 +768,17 @@ async def live_meeting(websocket: WebSocket, meeting_id: str, api_key: str | Non
             await websocket.send_json({"type": "error", "message": "会议不存在"})
             await websocket.close(code=1008)
             return
-        raw = extract_api_key(websocket.headers.get("authorization"), websocket.headers.get("x-api-key"), api_key)
+        authorization = websocket.headers.get("authorization")
+        if not authorization and token:
+            authorization = f"Bearer {token}"
         try:
             class WsRequest:
                 headers = websocket.headers
                 url = websocket.url
-            require_meeting_key(WsRequest(), session, raw)
+            kind, principal = resolve_principal(WsRequest(), session, authorization, websocket.headers.get("x-api-key") or api_key)
+            owner = _principal_user(session, kind, principal)
+            if owner is not None and owner.role != "admin" and meeting.user_id != owner.id:
+                raise HTTPException(404, "会议不存在")
         except HTTPException as exc:
             await websocket.send_json({"type": "error", "message": exc.detail})
             await websocket.close(code=1008)

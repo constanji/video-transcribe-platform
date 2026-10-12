@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .parser_runtime import ParseError, bili_play_url, cover_referer, download_bytes, parse_media
+from .auth import get_current_user, get_current_user_flex, require_admin
 from .templates_loader import HOME_DEFAULT_NAMES, find_builtin_template, load_builtin_templates, template_sort_key
 from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Text, create_engine, func, or_, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
@@ -392,6 +393,27 @@ def db_session():
         yield session
 
 
+def video_scope(user: Any) -> list:
+    """数据隔离：admin 看全部，普通用户只看自己的。返回附加 where 条件列表。"""
+    return [] if user.role == "admin" else [VideoAsset.user_id == user.id]
+
+
+def get_owned_video(session: Session, user: Any, video_id: str) -> VideoAsset:
+    """取视频并校验归属；不存在或越权一律 404（不暴露存在性）。"""
+    video = session.get(VideoAsset, video_id)
+    if video is None or (user.role != "admin" and video.user_id != user.id):
+        raise HTTPException(404, "视频不存在")
+    return video
+
+
+def get_owned_job(session: Session, user: Any, job_id: str) -> ProcessingJob:
+    job = session.get(ProcessingJob, job_id)
+    if job is None:
+        raise HTTPException(404, "任务不存在")
+    get_owned_video(session, user, job.video_asset_id)
+    return job
+
+
 def video_flags(session: Session, video_id: str) -> dict[str, Any]:
     has_transcript = session.scalar(select(Transcript.id).where(Transcript.video_asset_id == video_id).limit(1)) is not None
     has_summary = session.scalar(select(Summary.id).where(Summary.video_asset_id == video_id).limit(1)) is not None
@@ -756,7 +778,7 @@ def health():
 
 
 @app.post("/api/system/moss/warmup")
-def warmup_moss():
+def warmup_moss(user: Any = Depends(get_current_user)):
     moss_url = moss_service_url()
     try:
         with httpx.Client(timeout=900.0) as client:
@@ -810,7 +832,7 @@ def _related_videos(session: Session, parsed) -> list[VideoAsset]:
 
 
 @app.post("/api/parse")
-def parse(request: ParseRequest, session: Session = Depends(db_session)):
+def parse(request: ParseRequest, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     now = datetime.now(timezone.utc)
     try:
         parser_settings = merge_settings(
@@ -821,9 +843,10 @@ def parse(request: ParseRequest, session: Session = Depends(db_session)):
         parsed = parse_media(request.url, shipinhao_cookie=str(shipinhao.get("cookies") or ""))
     except ParseError as exc:
         raise HTTPException(502, str(exc)) from exc
-    related = _related_videos(session, parsed)
+    # 数据隔离：重复资产只复用本人（或 admin 视角）的，不碰别人的视频。
+    related = [item for item in _related_videos(session, parsed) if user.role == "admin" or item.user_id == user.id]
     existing = related[0] if related else None
-    video = existing or VideoAsset(source_url=parsed.source_url, normalized_url=parsed.normalized_url)
+    video = existing or VideoAsset(source_url=parsed.source_url, normalized_url=parsed.normalized_url, user_id=user.id)
     video.source_url = parsed.source_url
     video.normalized_url = parsed.normalized_url
     video.platform = parsed.platform
@@ -970,7 +993,7 @@ def _video_detail(video: VideoAsset, session: Session) -> dict[str, Any]:
 
 
 @app.post("/api/uploads")
-async def upload_media(file: UploadFile = File(...), session: Session = Depends(db_session)):
+async def upload_media(file: UploadFile = File(...), user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     original_name = Path((file.filename or "").replace("\\", "/")).name
     extension = Path(original_name).suffix.lower()
     media_type = UPLOAD_FORMATS.get(extension)
@@ -996,7 +1019,10 @@ async def upload_media(file: UploadFile = File(...), session: Session = Depends(
             raise HTTPException(400, "不能上传空文件")
         sha256 = digest.hexdigest()
         source_url = f"upload://sha256/{sha256}"
-        existing = session.scalars(select(VideoAsset).where(VideoAsset.normalized_url == source_url)).first()
+        # 去重只在本人的资产内进行；别人上传过同一文件 → 为本人新建一份。
+        existing = session.scalars(
+            select(VideoAsset).where(VideoAsset.normalized_url == source_url, VideoAsset.user_id == user.id)
+        ).first()
         if existing:
             temp_path.unlink(missing_ok=True)
             return {"video": _video_detail(existing, session), "duplicate": True}
@@ -1004,7 +1030,7 @@ async def upload_media(file: UploadFile = File(...), session: Session = Depends(
         final_path = UPLOAD_DIR / f"{sha256}{extension}"
         os.replace(temp_path, final_path)
         now = datetime.now(timezone.utc)
-        video = VideoAsset(source_url=source_url, normalized_url=source_url, platform="upload", source_platform="upload", platform_video_id=sha256, title=Path(original_name).stem[:500] or "未命名上传", author="本地上传", duration_seconds=duration, parse_status="uploaded", available_formats=[{"format": extension[1:], "quality": "原始文件"}], last_processed_at=now)
+        video = VideoAsset(source_url=source_url, normalized_url=source_url, platform="upload", source_platform="upload", platform_video_id=sha256, title=Path(original_name).stem[:500] or "未命名上传", author="本地上传", duration_seconds=duration, parse_status="uploaded", available_formats=[{"format": extension[1:], "quality": "原始文件"}], last_processed_at=now, user_id=user.id)
         session.add(video)
         session.flush()
         session.add(MediaVariant(video_asset_id=video.id, format=extension[1:], quality="原始文件", media_type=media_type, local_path=str(final_path), file_size=size, download_status="downloaded"))
@@ -1022,10 +1048,10 @@ async def upload_media(file: UploadFile = File(...), session: Session = Depends(
 
 
 @app.get("/api/videos")
-def list_videos(session: Session = Depends(db_session), q: str | None = None):
+def list_videos(user: Any = Depends(get_current_user), session: Session = Depends(db_session), q: str | None = None):
     query = (
         select(VideoAsset)
-        .where(VideoAsset.platform != "meeting")
+        .where(VideoAsset.platform != "meeting", *video_scope(user))
         .order_by(VideoAsset.updated_at.desc())
     )
     if q:
@@ -1034,10 +1060,10 @@ def list_videos(session: Session = Depends(db_session), q: str | None = None):
 
 
 @app.get("/api/videos/recent")
-def recent_videos(session: Session = Depends(db_session)):
+def recent_videos(user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     videos = session.scalars(
         select(VideoAsset)
-        .where(VideoAsset.platform != "meeting")
+        .where(VideoAsset.platform != "meeting", *video_scope(user))
         .order_by(func.coalesce(VideoAsset.last_processed_at, VideoAsset.updated_at).desc())
         .limit(6)
     ).all()
@@ -1046,13 +1072,14 @@ def recent_videos(session: Session = Depends(db_session)):
 
 @app.get("/api/history")
 def history(
+    user: Any = Depends(get_current_user),
     session: Session = Depends(db_session),
     q: str | None = None,
     platform: str | None = None,
     job_type: str | None = None,
     status: str | None = None,
 ):
-    query = select(VideoAsset).where(VideoAsset.platform != "meeting").order_by(VideoAsset.updated_at.desc())
+    query = select(VideoAsset).where(VideoAsset.platform != "meeting", *video_scope(user)).order_by(VideoAsset.updated_at.desc())
     if q:
         like = f"%{q}%"
         query = query.where(or_(VideoAsset.title.ilike(like), VideoAsset.author.ilike(like), VideoAsset.platform.ilike(like)))
@@ -1070,28 +1097,28 @@ def history(
 
 
 @app.get("/api/history/{video_id}")
-def history_detail(video_id: str, session: Session = Depends(db_session)):
+def history_detail(video_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    get_owned_video(session, user, video_id)
     return get_video(video_id, session)
 
 
 @app.get("/api/videos/{video_id}/variants")
-def variants(video_id: str, session: Session = Depends(db_session)):
-    if not session.get(VideoAsset, video_id): raise HTTPException(404, "视频不存在")
+def variants(video_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    get_owned_video(session, user, video_id)
     return [{"id": x.id, "format": x.format, "quality": x.quality, "media_type": x.media_type, "download_status": x.download_status, "file_size": x.file_size} for x in session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video_id)).all()]
 
 
 @app.get("/api/videos/{video_id}")
-def get_video(video_id: str, session: Session = Depends(db_session)):
-    video = session.get(VideoAsset, video_id)
-    if not video:
-        raise HTTPException(404, "视频不存在")
+def get_video(video_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    video = get_owned_video(session, user, video_id)
     return _video_detail(video, session)
 
 
 @app.get("/api/videos/{video_id}/thumbnail")
-def thumbnail(video_id: str, session: Session = Depends(db_session)):
-    video = session.get(VideoAsset, video_id)
-    if not video or not video.thumbnail_path:
+def thumbnail(video_id: str, user: Any = Depends(get_current_user_flex), session: Session = Depends(db_session)):
+    # <img> 不能带 Authorization header，token 走 ?token=（get_current_user_flex）。
+    video = get_owned_video(session, user, video_id)
+    if not video.thumbnail_path:
         raise HTTPException(404, "封面不存在")
     path = Path(video.thumbnail_path)
     if not path.exists():
@@ -1100,8 +1127,8 @@ def thumbnail(video_id: str, session: Session = Depends(db_session)):
 
 
 @app.get("/api/videos/{video_id}/download/{variant_id}")
-def download_variant(video_id: str, variant_id: str, session: Session = Depends(db_session)):
-    video = session.get(VideoAsset, video_id)
+def download_variant(video_id: str, variant_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    video = get_owned_video(session, user, video_id)
     variant = session.get(MediaVariant, variant_id)
     if not video or not variant or variant.video_asset_id != video_id:
         raise HTTPException(404, "媒体资源不存在")
@@ -1170,8 +1197,8 @@ def download_variant(video_id: str, variant_id: str, session: Session = Depends(
 
 
 @app.post("/api/jobs")
-def create_job(request: JobRequest, session: Session = Depends(db_session)):
-    if not session.get(VideoAsset, request.video_id): raise HTTPException(404, "视频不存在")
+def create_job(request: JobRequest, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    get_owned_video(session, user, request.video_id)
     job = ProcessingJob(video_asset_id=request.video_id, job_type=request.job_type, current_stage="queued")
     session.add(job); session.commit(); session.refresh(job)
     return {"id": job.id, "video_id": job.video_asset_id, "status": job.status, "progress": job.progress, "current_stage": job.current_stage}
@@ -1206,11 +1233,9 @@ def _moss_busy_message(settings: dict[str, Any] | None = None) -> str | None:
 
 
 @app.delete("/api/jobs/{job_id}")
-def cancel_job(job_id: str, session: Session = Depends(db_session)):
+def cancel_job(job_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     """取消在途任务：MOSS 侧会 kill 掉推理子进程，立即释放推理锁。"""
-    job = session.get(ProcessingJob, job_id)
-    if not job:
-        raise HTTPException(404, "任务不存在")
+    job = get_owned_job(session, user, job_id)
     if job.status in {"completed", "failed", "cancelled"}:
         return job_dict(job)
     moss_id = (job.progress_json or {}).get("moss_job_id")
@@ -1229,10 +1254,8 @@ def cancel_job(job_id: str, session: Session = Depends(db_session)):
 
 
 @app.post("/api/videos/{video_id}/transcribe")
-def transcribe(video_id: str, payload: dict[str, Any] | None = None, session: Session = Depends(db_session)):
-    video = session.get(VideoAsset, video_id)
-    if not video:
-        raise HTTPException(404, "视频不存在")
+def transcribe(video_id: str, payload: dict[str, Any] | None = None, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    video = get_owned_video(session, user, video_id)
     body = payload or {}
     settings = current_transcription()
     moss = probe_moss(moss_service_url(settings))
@@ -1669,10 +1692,8 @@ def _summary_ready(settings: dict[str, Any]) -> bool:
 
 
 @app.post("/api/videos/{video_id}/summary")
-def summary(video_id: str, payload: dict[str, Any] | None = None, session: Session = Depends(db_session)):
-    video = session.get(VideoAsset, video_id)
-    if not video:
-        raise HTTPException(404, "视频不存在")
+def summary(video_id: str, payload: dict[str, Any] | None = None, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    video = get_owned_video(session, user, video_id)
     settings = current_transcription()
     if not _summary_ready(settings):
         raise HTTPException(400, "总结模型未配置")
@@ -1688,10 +1709,8 @@ def summary(video_id: str, payload: dict[str, Any] | None = None, session: Sessi
 
 
 @app.post("/api/videos/{video_id}/summaries")
-def summary_from_transcript(video_id: str, payload: dict[str, Any] | None = None, session: Session = Depends(db_session)):
-    video = session.get(VideoAsset, video_id)
-    if not video:
-        raise HTTPException(404, "视频不存在")
+def summary_from_transcript(video_id: str, payload: dict[str, Any] | None = None, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    video = get_owned_video(session, user, video_id)
     settings = current_transcription()
     if not _summary_ready(settings):
         raise HTTPException(400, "总结模型未配置")
@@ -1705,38 +1724,35 @@ def summary_from_transcript(video_id: str, payload: dict[str, Any] | None = None
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str, session: Session = Depends(db_session)):
-    job = session.get(ProcessingJob, job_id)
-    if not job: raise HTTPException(404, "任务不存在")
+def get_job(job_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    job = get_owned_job(session, user, job_id)
     return job_dict(job)
 
 
 @app.post("/api/jobs/{job_id}/retry")
-def retry_job(job_id: str, session: Session = Depends(db_session)):
-    job = session.get(ProcessingJob, job_id)
-    if not job: raise HTTPException(404, "任务不存在")
+def retry_job(job_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    job = get_owned_job(session, user, job_id)
     job.status, job.progress, job.current_stage, job.error_message = "queued", 0, "queued", None
     session.commit(); return job_dict(job)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
-def cancel_job(job_id: str, session: Session = Depends(db_session)):
-    job = session.get(ProcessingJob, job_id)
-    if not job: raise HTTPException(404, "任务不存在")
+def cancel_job(job_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    job = get_owned_job(session, user, job_id)
     job.status, job.current_stage = "cancelled", "cancelled"
     session.commit(); return job_dict(job)
 
 
 @app.get("/api/jobs/{job_id}/events")
-def job_events(job_id: str, session: Session = Depends(db_session)):
-    if not session.get(ProcessingJob, job_id): raise HTTPException(404, "任务不存在")
+def job_events(job_id: str, user: Any = Depends(get_current_user_flex), session: Session = Depends(db_session)):
+    get_owned_job(session, user, job_id)
     def stream():
         yield "event: status\ndata: {\"job_id\": \"%s\", \"status\": \"queued\", \"progress\": 0}\n\n" % job_id
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @app.get("/api/templates")
-def list_templates(listed: bool | None = Query(None), session: Session = Depends(db_session)):
+def list_templates(listed: bool | None = Query(None), user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     query = select(SummaryTemplate).where(SummaryTemplate.is_active.is_(True))
     if listed:
         query = query.where(SummaryTemplate.show_on_home.is_(True))
@@ -1781,21 +1797,21 @@ def config_endpoint(key: str, session: Session, payload: dict[str, Any] | None =
 
 
 @app.get("/api/settings/{group}")
-def get_settings(group: str, session: Session = Depends(db_session)):
+def get_settings(group: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     if group not in SETTING_DEFAULTS:
         raise HTTPException(404, "设置分组不存在")
     return config_endpoint(group, session)
 
 
 @app.put("/api/settings/{group}")
-def put_settings(group: str, payload: dict[str, Any], session: Session = Depends(db_session)):
+def put_settings(group: str, payload: dict[str, Any], _: Any = Depends(require_admin), session: Session = Depends(db_session)):
     if group not in SETTING_DEFAULTS:
         raise HTTPException(404, "设置分组不存在")
     return config_endpoint(group, session, payload)
 
 
 @app.post("/api/templates")
-def create_template(request: TemplateRequest, session: Session = Depends(db_session)):
+def create_template(request: TemplateRequest, _: Any = Depends(require_admin), session: Session = Depends(db_session)):
     if not (request.name or "").strip():
         raise HTTPException(400, "请填写模板名称")
     template = SummaryTemplate(
@@ -1812,7 +1828,7 @@ def create_template(request: TemplateRequest, session: Session = Depends(db_sess
 
 
 @app.put("/api/templates/{template_id}")
-def update_template(template_id: str, request: TemplateRequest, session: Session = Depends(db_session)):
+def update_template(template_id: str, request: TemplateRequest, _: Any = Depends(require_admin), session: Session = Depends(db_session)):
     template = session.get(SummaryTemplate, template_id)
     if not template or not template.is_active:
         raise HTTPException(404, "模板不存在")
@@ -1831,7 +1847,7 @@ def update_template(template_id: str, request: TemplateRequest, session: Session
 
 
 @app.post("/api/templates/{template_id}/restore")
-def restore_template(template_id: str, session: Session = Depends(db_session)):
+def restore_template(template_id: str, _: Any = Depends(require_admin), session: Session = Depends(db_session)):
     template = session.get(SummaryTemplate, template_id)
     if not template or not template.is_active:
         raise HTTPException(404, "模板不存在")
@@ -1848,7 +1864,7 @@ def restore_template(template_id: str, session: Session = Depends(db_session)):
 
 
 @app.delete("/api/templates/{template_id}")
-def delete_template(template_id: str, session: Session = Depends(db_session)):
+def delete_template(template_id: str, _: Any = Depends(require_admin), session: Session = Depends(db_session)):
     template = session.get(SummaryTemplate, template_id)
     if not template:
         raise HTTPException(404, "模板不存在")
@@ -1860,9 +1876,8 @@ def delete_template(template_id: str, session: Session = Depends(db_session)):
 
 
 @app.delete("/api/videos/{video_id}")
-def delete_video(video_id: str, session: Session = Depends(db_session)):
-    video = session.get(VideoAsset, video_id)
-    if not video: raise HTTPException(404, "视频不存在")
+def delete_video(video_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    video = get_owned_video(session, user, video_id)
     if (video.platform or video.source_platform) == "upload":
         active_job = session.scalars(
             select(ProcessingJob).where(
