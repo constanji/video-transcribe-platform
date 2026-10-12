@@ -121,8 +121,24 @@ curl http://127.0.0.1:9000/health
 | `MOSS_URL` | `http://localhost:9000` | MOSS 服务地址 |
 | `MOSS_PRELOAD` | `1` | 是否启动后预热模型 |
 | `STORAGE_ROOT` | `./storage` | 下载媒体和中间文件目录 |
+| `JWT_ACCESS_SECRET` | 空（从 `API_SECRET` 派生） | 访问令牌密钥，弱值（如 `change-me`）会导致拒绝启动 |
+| `JWT_REFRESH_SECRET` | 空（从 `API_SECRET` 派生） | 刷新令牌密钥，轮换会使全部会话失效 |
+| `REGISTRATION_MODE` | `open` | `open` 开放注册；`admin_only` 仅管理员建用户（首位用户永远开放） |
+| `AUTH_LOCAL_BYPASS` | 空（关） | 设为 `1` 时本地浏览器无凭证可直连 API，仅用于本地开发 |
 
 不要提交 `.env`、数据库文件、模型文件或本地运行数据；仓库的 `.gitignore` 已排除这些内容。
+
+## 用户系统
+
+平台内置账号体系，浏览器端统一使用 JWT（Bearer），API Key 保留给编程访问：
+
+- **注册/登录**：`POST /api/auth/register`、`POST /api/auth/login`。系统没有任何用户时，首位注册者成为管理员，历史数据自动归属其名下
+- **令牌**：access 30 分钟 + refresh 14 天，一次性轮换（旧 refresh 再用会撤销该会话并拒绝）；刷新失败即跳登录页
+- **数据隔离**：普通用户只能看到自己的视频/会议/任务，越权一律返回 404；管理员可见全部数据
+- **会话管理**：改密、禁用、重置密码会踢掉该用户全部设备；`设置 → 用户管理`（仅管理员）可禁用/启用、改角色、重置密码、删号
+- **登出**：右上角用户菜单 → 退出登录
+
+公开端点仅 `/api/auth/*`、`/api/system/health`、`/api/platforms`，其余全部需要登录。
 
 ## 项目结构
 
@@ -156,6 +172,8 @@ pyproject.toml            Python API 依赖
 - `GET /api/system/health`：检查 API、MOSS 和模型状态
 - `GET/PUT /api/settings/{group}`：读取和保存设置
 - `GET/POST/PUT/DELETE /api/templates...`：管理总结模板
+- `POST /api/auth/register|login|refresh|logout`、`GET /api/auth/me`：账号与会话
+- `GET/PUT/DELETE /api/admin/users...`：用户管理（管理员）
 
 ## 开发检查
 
@@ -177,7 +195,7 @@ curl http://localhost:9001/health
 - 转录依赖 MOSS/FunASR 模型及其运行环境
 - 总结依赖 `llama-cli` 和本地 GGUF 模型，或已配置的远程 Provider
 - Compose 中的 GPU、模型目录和宿主机路径需要按部署机器调整
-- 目前定位为单管理员自部署工具，不包含多租户、团队权限和云端托管能力
+- 用户系统覆盖注册/登录/会话/数据隔离/用户管理；不包含邮箱验证、2FA、社交登录和多租户能力
 
 ## 相关文档
 

@@ -67,6 +67,9 @@ jobs:
               "/api/videos",
               "/api/v1/meetings",
               "/api/v1/api-keys",
+              "/api/auth/login",
+              "/api/auth/me",
+              "/api/admin/users",
           }
           missing = sorted(required - paths)
           assert not missing, f"routes missing from the OpenAPI schema: {missing}"

@@ -44,6 +44,11 @@ services:
       # (same host:port as NEXT_PUBLIC_API_URL, not "localhost").
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:${API_PORT:-8000}}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:${WEB_PORT:-3000}}
+      # 用户系统：JWT 密钥不设则从 API_SECRET 派生（弱值会导致 API 拒绝启动）；
+      # REGISTRATION_MODE=open|admin_only；AUTH_LOCAL_BYPASS 服务器不要设。
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-}
+      REGISTRATION_MODE: ${REGISTRATION_MODE:-open}
     volumes:
       - plugin_parser_storage:/data
       - ${ASSET_ROOT:-/opt/plugin_parser}/models:/models:ro

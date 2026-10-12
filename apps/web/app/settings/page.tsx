@@ -8,26 +8,30 @@ import TemplateSettings from '../../components/TemplateSettings';
 import Toast from '../../components/Toast';
 import TopBar from '../../components/TopBar';
 import TranscriptionSettings from '../../components/TranscriptionSettings';
+import UserManagement from '../../components/UserManagement';
 import { api } from '../../lib/api';
+import { useAuth } from '../providers';
 import type { Template } from '../../lib/types';
 
-type Tab = 'parser' | 'transcription' | 'templates' | 'services';
+type Tab = 'parser' | 'transcription' | 'templates' | 'services' | 'users';
 
 export default function SettingsPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [tab, setTab] = useState<Tab>('parser');
   const [parser, setParser] = useState(PARSER_DEFAULTS);
   const [transcription, setTranscription] = useState<any>({});
   const [services, setServices] = useState<any>({});
-  const [saved, setSaved] = useState<Record<Exclude<Tab, 'templates'>, any>>({ parser: PARSER_DEFAULTS, transcription: {}, services: {} });
+  const [saved, setSaved] = useState<Record<Exclude<Tab, 'templates' | 'users'>, any>>({ parser: PARSER_DEFAULTS, transcription: {}, services: {} });
   const [templates, setTemplates] = useState<Template[]>([]);
   const [toast, setToast] = useState<{ message: string; kind?: 'success' | 'error' }>({ message: '' });
 
   useEffect(() => {
     const requested = new URLSearchParams(window.location.search).get('tab');
-    if (requested === 'parser' || requested === 'transcription' || requested === 'templates' || requested === 'services') {
+    if (requested === 'parser' || requested === 'transcription' || requested === 'templates' || requested === 'services' || (requested === 'users' && isAdmin)) {
       setTab(requested);
     }
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     Promise.all([
@@ -46,7 +50,7 @@ export default function SettingsPage() {
 
   const current = tab === 'parser' ? parser : tab === 'transcription' ? transcription : tab === 'services' ? services : null;
   const dirty = useMemo(() => {
-    if (tab === 'templates') return false;
+    if (tab === 'templates' || tab === 'users') return false;
     return JSON.stringify(current) !== JSON.stringify(saved[tab]);
   }, [current, saved, tab]);
 
@@ -64,7 +68,7 @@ export default function SettingsPage() {
   }
 
   async function save() {
-    if (tab === 'templates') return;
+    if (tab === 'templates' || tab === 'users') return;
     try {
       const payload = tab === 'parser' ? parser : tab === 'transcription' ? transcription : services;
       const stored = await api<any>(`/api/settings/${tab}`, { method: 'PUT', body: JSON.stringify(payload) });
@@ -97,7 +101,7 @@ export default function SettingsPage() {
       </div>
       <Toast message={toast.message} kind={toast.kind} onClose={() => setToast({ message: '' })} />
       <div className="settings-card">
-        <SettingsTabs value={tab} onChange={changeTab} />
+        <SettingsTabs value={tab} onChange={changeTab} showUsers={isAdmin} />
         <div className="settings-content">
           {tab === 'parser' && <ParserSettings value={parser} onChange={setParser} />}
           {tab === 'transcription' && (
@@ -115,7 +119,8 @@ export default function SettingsPage() {
             />
           )}
           {tab === 'services' && <ServiceSettings value={services} onChange={setServices} />}
-          {tab !== 'templates' && (
+          {tab === 'users' && <UserManagement onToast={(message, kind) => setToast({ message, kind })} />}
+          {tab !== 'templates' && tab !== 'users' && (
             <div className="detail-actions">
               <button type="button" className="save-settings" onClick={save}>保存当前分组</button>
               <button type="button" className="outline-button" onClick={restore}>恢复默认值</button>
