@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import multiprocessing as mp
 import os
 import re
@@ -125,6 +127,56 @@ def _chunk_seconds() -> float:
 def _chunk_workers() -> int:
     """切片并行推理的线程数。1 = 走原来的整段推理（说话人标签最连贯）。"""
     return max(1, _env_int("MOSS_CHUNK_WORKERS", 4))
+
+
+def _chunk_cache_dir() -> Path:
+    """分块转写结果的磁盘缓存目录：失败/取消后续转时复用已完成的块。"""
+    return Path(os.getenv("MOSS_CACHE_DIR") or (Path(__file__).resolve().parent / ".chunk-cache"))
+
+
+def _chunk_cache_key(wav_path: str, cache_ns: str | None) -> str | None:
+    """缓存键 = 命名空间（模型/语言/版本）+ 该块音频内容的 sha256。
+
+    内容寻址保证同一份音频的同一块必然命中，换模型/换语言/切法不同时自动失效。
+    """
+    if not cache_ns:
+        return None
+    try:
+        digest = hashlib.sha256()
+        digest.update(cache_ns.encode("utf-8", "ignore"))
+        with open(wav_path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except Exception:  # noqa: BLE001 - 缓存键算不出来就走正常推理
+        return None
+
+
+def _chunk_cache_load(key: str | None) -> list[dict[str, Any]] | None:
+    if not key:
+        return None
+    try:
+        with open(_chunk_cache_dir() / f"{key}.json", "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, list) else None
+    except Exception:  # noqa: BLE001 - 无缓存/损坏缓存都按未命中处理
+        return None
+
+
+def _chunk_cache_store(key: str | None, segments: list[dict[str, Any]]) -> None:
+    """原子写入（临时文件+改名）：多线程并行时各块写各自文件，互不干扰。"""
+    if not key:
+        return
+    try:
+        cache_dir = _chunk_cache_dir()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        target = cache_dir / f"{key}.json"
+        tmp = target.with_name(f"{target.stem}.tmp")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(segments, handle, ensure_ascii=False)
+        os.replace(tmp, target)
+    except Exception:  # noqa: BLE001 - 缓存写失败绝不能影响转录主流程
+        pass
 
 
 def _worker_spawn_context():
@@ -525,30 +577,51 @@ def _set_cpu_threads(workers: int) -> None:
         pass
 
 
-def _infer_file(runtime: Any, wav_path: str, audio_seconds: float | None, progress=None, chunk_seconds: float | None = None, chunk_workers: int | None = None) -> tuple[list[dict[str, Any]], bool]:
+def _infer_file(runtime: Any, wav_path: str, audio_seconds: float | None, progress=None, chunk_seconds: float | None = None, chunk_workers: int | None = None, cache_ns: str | None = None) -> tuple[list[dict[str, Any]], bool]:
     """返回 (segments, 是否走了切片并行)。
 
     切片并行时说话人标签是「分片内编号」，跨分片不保证同一个代号对应同一个人；
     需要最连贯的说话人编号就设 MOSS_CHUNK_WORKERS=1 走整段推理。
+
+    cache_ns 非空时启用分块结果磁盘缓存：每块推理完立刻落盘，失败/取消后续转
+    （重新提交同一份音频）直接复用已完成的块，只重跑缺失的部分。
     """
     chunk_seconds = float(chunk_seconds) if chunk_seconds else _chunk_seconds()
     workers = max(1, int(chunk_workers)) if chunk_workers else _chunk_workers()
     total = audio_seconds or 0
     use_chunks = workers > 1 and chunk_seconds > 0 and total > chunk_seconds * 1.2
+
+    def infer_and_cache(path: str, offset_seconds: float, next_offset_seconds: float) -> list[dict[str, Any]]:
+        """推理单个切片（或整段），换算为绝对时间；命中则直接返回。
+
+        缓存里存的是相对块起点的时间：内容相同的块（静音段、循环背景音）
+        共享同一份缓存也不会串时间戳，命中后再按本块偏移换算。
+        """
+        key = _chunk_cache_key(path, cache_ns)
+        span_ms = max(0.0, (next_offset_seconds - offset_seconds) * 1000)
+        segments = _chunk_cache_load(key)
+        if not isinstance(segments, list):
+            result = runtime.generate(input=path, cache={}, disable_pbar=True, batch_size=1)
+            segments = _segments_from_funasr(result, round(span_ms, 1))
+            _chunk_cache_store(key, segments)
+        for item in segments:
+            item["start_ms"] = round(float(item.get("start_ms") or 0) + offset_seconds * 1000, 1)
+            item["end_ms"] = round(float(item.get("end_ms") or 0) + offset_seconds * 1000, 1)
+        return segments
+
     if not use_chunks:
-        result = runtime.generate(input=wav_path, cache={}, disable_pbar=True, batch_size=1)
-        return _segments_from_funasr(result, round(total * 1000, 1)), False
+        return infer_and_cache(wav_path, 0.0, total), False
     chunks = _slice_wav(wav_path, chunk_seconds)
     if len(chunks) <= 1:
-        result = runtime.generate(input=wav_path, cache={}, disable_pbar=True, batch_size=1)
-        return _segments_from_funasr(result, round(total * 1000, 1)), False
+        return infer_and_cache(wav_path, 0.0, total), False
     _set_cpu_threads(workers)
     parts: list[Any] = [None] * len(chunks)
     done = 0
 
     def run(index: int) -> None:
         nonlocal done
-        parts[index] = runtime.generate(input=chunks[index][0], cache={}, disable_pbar=True, batch_size=1)
+        next_offset = chunks[index + 1][1] if index + 1 < len(chunks) else total
+        parts[index] = infer_and_cache(chunks[index][0], chunks[index][1], next_offset)
         done += 1
         if progress:
             progress(done, len(chunks))
@@ -557,15 +630,9 @@ def _infer_file(runtime: Any, wav_path: str, audio_seconds: float | None, progre
         with ThreadPoolExecutor(max_workers=min(workers, len(chunks))) as pool:
             list(pool.map(run, range(len(chunks))))
         merged: list[dict[str, Any]] = []
-        for index, ((_path, offset), part) in enumerate(zip(chunks, parts)):
-            if part is None:
-                continue
-            next_offset = chunks[index + 1][1] if index + 1 < len(chunks) else total
-            chunk_ms = max(0.0, (next_offset - offset) * 1000)
-            for item in _segments_from_funasr(part, round(chunk_ms, 1)):
-                item["start_ms"] = round(float(item.get("start_ms") or 0) + offset * 1000, 1)
-                item["end_ms"] = round(float(item.get("end_ms") or 0) + offset * 1000, 1)
-                merged.append(item)
+        for part in parts:
+            if part:
+                merged.extend(part)
         merged.sort(key=lambda item: item["start_ms"])
         return merged, True
     finally:
@@ -608,6 +675,7 @@ def _worker_main(conn) -> None:
                         lambda done, total: conn.send({"event": "progress", "done": done, "total": total}),
                         command.get("chunk_seconds"),
                         command.get("chunk_workers"),
+                        command.get("cache_ns"),
                     )
                     conn.send({"event": "done", "segments": segments, "parallel": parallel})
                 except Exception as exc:
@@ -854,6 +922,9 @@ def _transcribe(request: TranscriptionRequest, job: dict[str, Any], fail_fast: b
         chunk_options = {
             "chunk_seconds": request.chunk_seconds,
             "chunk_workers": request.chunk_workers,
+            # 分块缓存命名空间：模型 + 语言 + 版本。内容寻址已保证同音频同块命中，
+            # 这里再隔离「不同模型/语言」的产物，避免换参后吃到旧结果。
+            "cache_ns": f"v1|{MOSS_MODEL_PATH.name}|{request.language or 'zh'}",
         }
         if fail_fast:
             # 实时同步：限时抢锁，抢不到立刻抛 InferBusy，由客户端排队重试。
