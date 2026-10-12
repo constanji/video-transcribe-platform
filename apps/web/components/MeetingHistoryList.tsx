@@ -83,7 +83,8 @@ export default function MeetingHistoryList({
                   会议纪要 · {MODE_LABEL[item.mode] || item.mode}
                   {formatDuration(item.duration_seconds) ? ` · ${formatDuration(item.duration_seconds)}` : ''}
                 </small>
-                <small>
+                <small className={item.status === 'processing' || item.status === 'summarizing' ? 'history-status busy' : 'history-status'}>
+                  {(item.status === 'processing' || item.status === 'summarizing') && <i className="badge-dot" />}
                   {STATUS_LABEL[item.status] || item.status}
                   {item.has_summary ? ' · 纪要已完成' : ' · 纪要未完成'}
                 </small>

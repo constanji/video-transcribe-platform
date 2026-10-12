@@ -291,3 +291,18 @@ a.recent-card{text-decoration:none;color:inherit;display:block}
 .user-actions .outline-button.danger{color:#a74343;border-color:#f0c7c7}
 .user-actions .outline-button.danger:hover{background:#fff5f5}
 .user-actions .outline-button:disabled{opacity:.5;cursor:not-allowed}
+/* 转录中/总结中的醒目标识：脉冲徽标 + 闪烁圆点 */
+.meeting-cover-badge.busy{display:inline-flex;align-items:center;gap:6px;color:#0b57a4;background:rgba(224,239,255,.95);box-shadow:0 1px 0 0 rgba(29,104,187,.35);animation:busy-badge-pulse 1.6s ease-in-out infinite}
+.badge-dot{flex:none;width:7px;height:7px;border-radius:50%;background:#1d68bb;animation:badge-dot-blink 1.2s ease-in-out infinite}
+@keyframes busy-badge-pulse{0%,100%{box-shadow:0 0 0 0 rgba(29,104,187,.4)}55%{box-shadow:0 0 0 7px rgba(29,104,187,0)}}
+@keyframes badge-dot-blink{0%,100%{opacity:1}50%{opacity:.25}}
+.status-text.is-busy{color:#1d68bb;font-weight:650}
+.status-text.is-failed{color:#a74343}
+.history-status{display:inline-flex;align-items:center;gap:5px}
+.history-status.busy{color:#1d68bb;font-weight:650}
+/* 会议面板左侧：转录进行中的状态块 */
+.studio-transcribing{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:40px 18px;text-align:center;color:var(--muted)}
+.studio-transcribing h3{margin:0;font-size:15px;color:var(--text)}
+.studio-transcribing p{margin:0;font-size:13px}
+.studio-transcribing .studio-progress{width:min(260px,80%)}
+.studio-transcribing small{font-size:12px;color:var(--muted)}

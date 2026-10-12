@@ -66,6 +66,15 @@ export default function TranscriptStudio({
   async function load() {
     const next = await api<VideoAsset>(`/api/videos/${videoId}`);
     setVideo(next);
+    // 从列表/历史直接点进面板时，终稿转录可能正在跑：发现活动的转录任务就接管，
+    // 左侧立即出现转录状态与进度，完成后由下方轮询自动刷新出文字。
+    const active = (next.jobs || []).find(
+      (item) => item.job_type === 'transcribe' && !['completed', 'failed', 'cancelled'].includes(item.status),
+    );
+    setJob((current) => {
+      if (current && !['completed', 'failed', 'cancelled'].includes(current.status)) return current;
+      return active || current || null;
+    });
     return next;
   }
 
@@ -358,7 +367,17 @@ export default function TranscriptStudio({
               )}
             </div>
           <div className="studio-turns">
-            {!transcript && <p className="studio-empty-text">{transcribeRunning ? '正在重新转录，完成后文字会出现在这里。' : '还没有转录结果。'}</p>}
+            {!transcript && transcribeRunning ? (
+              <div className="studio-empty studio-transcribing">
+                <span className="studio-spinner" />
+                <h3>正在转录录音</h3>
+                <p>{job?.progress_detail?.message || '模型正在听录音，完成后文字会出现在这里。'}</p>
+                <div className="studio-progress"><i style={{ width: `${Math.max(progress, 8)}%` }} /></div>
+                <small>{progress}%</small>
+              </div>
+            ) : !transcript ? (
+              <p className="studio-empty-text">还没有转录结果。</p>
+            ) : null}
             {turns.map((item, index) => (
               <article className="studio-turn" key={`${item.text}-${index}`}>
                 <time>[{clock(segmentStart(item))}]</time>
@@ -427,7 +446,7 @@ export default function TranscriptStudio({
             {generating ? (
               <div className="studio-empty studio-processing">
                 <span className="studio-spinner" />
-                <h3>{transcribeRunning ? '正在重新转录' : '正在生成摘要'}</h3>
+                <h3>{transcribeRunning ? '正在转录录音' : '正在生成摘要'}</h3>
                 <p>{job?.progress_detail?.message || (transcribeRunning ? '模型正在听录音，请稍候。' : '模型正在读取转录内容，请稍候。')}</p>
                 <div className="studio-progress"><i style={{ width: `${Math.max(progress, 8)}%` }} /></div>
                 <small>{progress}%</small>

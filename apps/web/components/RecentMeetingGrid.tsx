@@ -80,7 +80,8 @@ export default function RecentMeetingGrid({
                 <div className="recent-cover meeting-cover">
                   <span>◉</span>
                   {item.status === 'recording' && <em className="meeting-cover-badge live">录音中</em>}
-                  {(item.status === 'processing' || item.status === 'summarizing') && <em className="meeting-cover-badge busy">转录中</em>}
+                  {item.status === 'processing' && <em className="meeting-cover-badge busy"><i className="badge-dot" />转录中</em>}
+                  {item.status === 'summarizing' && <em className="meeting-cover-badge busy"><i className="badge-dot" />总结中</em>}
                   {onDelete && (
                     <button
                       type="button"
@@ -97,7 +98,7 @@ export default function RecentMeetingGrid({
                 <h3>{item.title}</h3>
                 <p>{MODE_LABEL[item.mode] || item.mode}{duration ? ` · ${duration}` : ''}</p>
                 <p>{timeLabel(item.updated_at || item.created_at)}</p>
-                <p className="status-text">{STATUS_LABEL[item.status] || item.status}</p>
+                <p className={`status-text ${item.status === 'processing' || item.status === 'summarizing' ? 'is-busy' : ''} ${item.status === 'failed' ? 'is-failed' : ''}`}>{STATUS_LABEL[item.status] || item.status}</p>
                 <p className="flags">
                   <span>{item.has_transcript ? '已有转录' : '无转录'}</span>
                   <span>{item.has_summary ? '已有纪要' : '无纪要'}</span>
