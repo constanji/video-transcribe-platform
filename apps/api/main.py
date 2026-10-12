@@ -1108,6 +1108,64 @@ def variants(video_id: str, user: Any = Depends(get_current_user), session: Sess
     return [{"id": x.id, "format": x.format, "quality": x.quality, "media_type": x.media_type, "download_status": x.download_status, "file_size": x.file_size} for x in session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video_id)).all()]
 
 
+def _video_file_paths(session: Session, video_id: str) -> list[tuple[str, Path]]:
+    """该任务在磁盘上的候选文件：会议录音 + 各媒体变体，去重保序。"""
+    candidates: list[tuple[str, Path]] = []
+    meeting = session.scalars(select(Meeting).where(Meeting.video_asset_id == video_id)).first()
+    if meeting is not None and meeting.audio_path:
+        candidates.append(("录音文件", Path(meeting.audio_path)))
+    for variant in session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video_id)).all():
+        if variant.local_path and (variant.local_path != (meeting.audio_path if meeting else None)):
+            label = variant.quality or variant.format or "媒体文件"
+            candidates.append((f"媒体文件（{label}）", Path(variant.local_path)))
+    files: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    for kind, path in candidates:
+        try:
+            resolved = str(path.resolve())
+            if resolved in seen or not path.is_file():
+                continue
+            seen.add(resolved)
+            files.append((kind, path))
+        except OSError:
+            continue
+    return files
+
+
+@app.get("/api/videos/{video_id}/files")
+def video_files(video_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    """列出该任务的落盘文件与所在目录；转录/纪要内容在数据库，走界面导出。"""
+    get_owned_video(session, user, video_id)
+    entries = _video_file_paths(session, video_id)
+    folder = str(entries[0][1].parent) if entries else None
+    folder_openable = bool(folder) and Path(folder).is_dir() and os.name == "nt"
+    return {
+        "video_id": video_id,
+        "folder": folder,
+        # 只有 API 跑在本机（Windows 宿主机）时才能帮忙拉起资源管理器；容器/远程部署只能给路径。
+        "folder_openable": folder_openable,
+        "files": [
+            {"kind": kind, "name": path.name, "path": str(path), "size": path.stat().st_size}
+            for kind, path in entries
+        ],
+    }
+
+
+@app.post("/api/videos/{video_id}/files/open")
+def video_open_folder(video_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    """在本机资源管理器中打开任务文件夹；仅 API 与用户同机时可行。"""
+    get_owned_video(session, user, video_id)
+    entries = _video_file_paths(session, video_id)
+    folder = str(entries[0][1].parent) if entries else None
+    if not folder or not Path(folder).is_dir():
+        raise HTTPException(404, "该任务没有落盘文件")
+    opener = getattr(os, "startfile", None)
+    if opener is None:
+        raise HTTPException(501, f"当前部署形态无法代开文件夹（服务端为 {os.name}），请手动访问：{folder}")
+    opener(folder)
+    return {"ok": True, "folder": folder}
+
+
 @app.get("/api/videos/{video_id}")
 def get_video(video_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     video = get_owned_video(session, user, video_id)
@@ -1347,8 +1405,6 @@ def _append_job_log(session: Session, job: ProcessingJob, message: str, level: s
 
 
 def _transcribe_progress(payload: dict[str, Any], waited: int, audio_seconds: float | None) -> tuple[float, dict[str, Any], str]:
-    raw = float(payload.get("progress") or 0)
-    moss_ratio = raw / 100 if raw > 1 else raw
     elapsed = int(payload.get("elapsed_seconds") or waited * 2)
     audio = payload.get("audio_seconds")
     if audio is None:
@@ -1356,6 +1412,20 @@ def _transcribe_progress(payload: dict[str, Any], waited: int, audio_seconds: fl
     audio = float(audio or 0) or None
     stage = str(payload.get("stage") or "transcribing")
     running = str(payload.get("status") or "running") == "running"
+    # 真实分块进度优先：done/total 片单调且准确。MOSS 心跳的 progress 字段是
+    # 墙钟估算（基于 RTF 假设），机器慢于假设时会停滞甚至倒退，只作兜底。
+    done = payload.get("done_chunks")
+    total = payload.get("total_chunks")
+    try:
+        chunk_ratio = float(done) / float(total) if done is not None and float(total or 0) > 0 else None
+    except (TypeError, ValueError):
+        chunk_ratio = None
+    raw = float(payload.get("progress") or 0)
+    wall_ratio = raw / 100 if raw > 1 else raw
+    if chunk_ratio is not None:
+        moss_ratio = chunk_ratio
+    else:
+        moss_ratio = wall_ratio
     # MOSS 已改用 fp32（CPU 上比 bf16 快约 4~5 倍），实时倍数约 2.5；
     # 可用 MOSS_RTF_HINT 覆盖。估时只影响进度条，不影响实际完成判断。
     rtf = float(os.environ.get("MOSS_RTF_HINT") or 2.5) if stage == "transcribing" else 1.0
@@ -1363,25 +1433,32 @@ def _transcribe_progress(payload: dict[str, Any], waited: int, audio_seconds: fl
     time_ratio = min(0.97, elapsed / estimate) if estimate else 0
     from_time = 0.30 + 0.62 * time_ratio
     from_moss = 0.28 + 0.64 * moss_ratio
-    overall = from_moss if moss_ratio >= 0.15 else max(from_moss, from_time)
-    if running and elapsed > estimate:
-        overall = min(0.94, max(overall, 0.80 + 0.14 * min(1.0, (elapsed - estimate) / max(estimate, 1))))
+    if chunk_ratio is not None:
+        overall = from_moss
+    else:
+        overall = from_moss if moss_ratio >= 0.15 else max(from_moss, from_time)
+        if running and elapsed > estimate:
+            overall = min(0.94, max(overall, 0.80 + 0.14 * min(1.0, (elapsed - estimate) / max(estimate, 1))))
     overall = min(0.95, max(0.28, overall))
     eta = payload.get("eta_seconds")
     if eta is None and audio:
         eta = max(0, int(estimate - elapsed))
     if running and eta is not None and int(eta) <= 0:
         eta = max(30, int(max(estimate - elapsed, elapsed * 0.25)))
-    message = str(payload.get("message") or "正在转录")
-    if running and stage == "transcribing":
-        message = f"CPU 正在推理 {int(audio or 0)} 秒音频，已用 {elapsed} 秒；百分比仅为估时，完成前不会到 100%"
+    # MOSS 的消息已含「已用/预计剩余/已完成 x/y 片」，直接透传；
+    # 只有它没给消息时才退回本地的墙钟描述。
+    message = str(payload.get("message") or "")
+    if running and stage == "transcribing" and not message:
+        message = f"正在转录 {int(audio or 0)} 秒音频，已用 {elapsed} 秒（进度为估算值）"
     detail = {
         "stage": stage,
-        "message": message,
+        "message": message or "正在转录",
         "percent": int(round(overall * 100)),
         "elapsed_seconds": elapsed,
         "audio_seconds": audio,
         "eta_seconds": eta,
+        "done_chunks": done,
+        "total_chunks": total,
     }
     return overall, detail, message
 

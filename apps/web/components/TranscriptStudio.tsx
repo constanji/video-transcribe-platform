@@ -29,6 +29,24 @@ function clock(ms: number) {
   return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
 }
 
+function formatSize(bytes: number) {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value >= 10 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
+}
+
+type FilesInfo = {
+  folder: string | null;
+  folder_openable: boolean;
+  files: { kind: string; name: string; path: string; size: number }[];
+};
+
 export default function TranscriptStudio({
   videoId,
   meetingId,
@@ -62,6 +80,8 @@ export default function TranscriptStudio({
   const [settings, setSettings] = useState<SummarySettings | null>(null);
   const [savingModel, setSavingModel] = useState(false);
   const [activeTemplateId, setActiveTemplateId] = useState(templateId);
+  const [fileInfo, setFileInfo] = useState<FilesInfo | null>(null);
+  const [filesLoading, setFilesLoading] = useState(false);
 
   async function load() {
     const next = await api<VideoAsset>(`/api/videos/${videoId}`);
@@ -268,6 +288,26 @@ export default function TranscriptStudio({
     onTemplateChange?.(id);
   }
 
+  // 查看任务在磁盘上的落盘文件（录音/媒体）与所在目录；转录与纪要在数据库里。
+  async function loadFiles() {
+    setFilesLoading(true);
+    try {
+      setFileInfo(await api<FilesInfo>(`/api/videos/${videoId}/files`));
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setFilesLoading(false);
+    }
+  }
+
+  async function openFolder() {
+    try {
+      await api(`/api/videos/${videoId}/files/open`, { method: 'POST' });
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    }
+  }
+
   async function generate() {
     if (!modelReady) {
       onToast('当前总结模型不可用，请在上方「AI 模型」里切换，或到设置页完成配置', 'error');
@@ -321,6 +361,10 @@ export default function TranscriptStudio({
         <header className="studio-titlebar">
           <strong>{video?.title || '转录结果'}</strong>
           <div className="studio-titlebar-actions">
+            {/* 查看该任务在磁盘上的文件（录音/媒体）与所在目录 */}
+            <button type="button" className="studio-tool" onClick={loadFiles} disabled={filesLoading}>
+              {filesLoading ? '读取中…' : '文件'}
+            </button>
             {/* 导出：转录给复制（两种粒度），总结给文档格式（当前支持 Markdown）。 */}
             <details className="export-menu" ref={exportRef}>
               <summary aria-label="导出">导出</summary>
@@ -500,6 +544,46 @@ export default function TranscriptStudio({
           </section>
         </div>
       </div>
+      {fileInfo && (
+        <div
+          className="confirm-mask"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setFileInfo(null);
+          }}
+        >
+          <div className="confirm-box files-box">
+            <h3>任务文件</h3>
+            {fileInfo.files.length ? (
+              <>
+                <p className="files-folder">{fileInfo.folder}</p>
+                <ul className="files-list">
+                  {fileInfo.files.map((item) => (
+                    <li key={item.path}>
+                      <em>{item.kind}</em>
+                      <strong>{item.name}</strong>
+                      <small>{formatSize(item.size)}</small>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <p className="files-folder">该任务还没有落盘文件。</p>
+            )}
+            <p className="files-note">转录文本与纪要保存在数据库中，可在本面板复制或通过「导出」生成文档。</p>
+            <div className="detail-actions">
+              {fileInfo.folder_openable && (
+                <button type="button" className="primary-button" onClick={openFolder}>
+                  打开文件夹
+                </button>
+              )}
+              <button type="button" className="outline-button" onClick={() => setFileInfo(null)}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
   if (typeof document === 'undefined') return dialog;

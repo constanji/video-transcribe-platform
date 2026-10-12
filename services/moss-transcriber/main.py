@@ -749,8 +749,11 @@ def _heartbeat(job: dict[str, Any], stop: threading.Event, start: int, end: int,
         total = int(job.get("total_chunks") or 0)
         if stage == "transcribing" and done and total and done < total:
             # 切片并行时有真实进度：按已完成分片推算剩余，比纯墙钟估算准得多。
+            # 剩余片数要除以并行度按「波」估算，否则首片完成时会把 ETA 放大 N 倍。
             ratio = min(0.97, done / total)
-            remain = max(1.0, (total - done) * (elapsed / done))
+            workers = max(1, _chunk_workers())
+            waves = max(1, -(-(total - done) // workers))
+            remain = max(1.0, waves * (elapsed / done))
             suffix = f"，已完成 {done}/{total} 片"
         else:
             ratio = min(0.97, elapsed / estimate)
