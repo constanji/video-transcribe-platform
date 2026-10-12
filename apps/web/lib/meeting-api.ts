@@ -1,9 +1,12 @@
-import { API, api } from './api';
+import { API, api, apiForm } from './api';
+import { getAccessToken } from './auth';
 import type { MeetingHistoryItem, MeetingRecord } from './types';
 
 export function meetingWsUrl(meetingId: string) {
   const wsBase = API.replace(/^http/, 'ws');
-  return `${wsBase}/api/v1/meetings/${meetingId}/live`;
+  const token = getAccessToken();
+  const query = token ? `?token=${encodeURIComponent(token)}` : '';
+  return `${wsBase}/api/v1/meetings/${meetingId}/live${query}`;
 }
 
 export function listMeetings() {
@@ -37,12 +40,5 @@ export function cancelJob(id: string) {
 export function uploadMeetingAudio(id: string, file: File, transcribe = true) {
   const body = new FormData();
   body.append('file', file);
-  return fetch(`${API}/api/v1/meetings/${id}/audio?transcribe=${transcribe ? 'true' : 'false'}`, {
-    method: 'POST',
-    body,
-  }).then(async (response) => {
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.detail || `上传失败（${response.status}）`);
-    return payload as MeetingRecord;
-  });
+  return apiForm<MeetingRecord>(`/api/v1/meetings/${id}/audio?transcribe=${transcribe ? 'true' : 'false'}`, body);
 }

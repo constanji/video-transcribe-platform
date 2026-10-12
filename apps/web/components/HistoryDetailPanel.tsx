@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { logoSrc } from '../lib/api';
+import { withToken } from '../lib/auth';
 import type { Platform, Template, VideoAsset } from '../lib/types';
 import DownloadAction from './DownloadAction';
 import SummaryAction from './SummaryAction';
@@ -42,7 +43,7 @@ export default function HistoryDetailPanel({
   return (
     <>
       <div className="detail-hero">
-        <div className="detail-cover">{video.thumbnail_url ? <img src={video.thumbnail_url} alt="" /> : <span>◈</span>}</div>
+        <div className="detail-cover">{video.thumbnail_url ? <img src={withToken(video.thumbnail_url)} alt="" /> : <span>◈</span>}</div>
         <div>
           <span className="platform-badge">
             <img src={logoSrc(platform?.logo)} alt="" width={16} height={16} />

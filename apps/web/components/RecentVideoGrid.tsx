@@ -1,6 +1,7 @@
 'use client';
 
 import { logoSrc } from '../lib/api';
+import { withToken } from '../lib/auth';
 import type { Platform, VideoAsset } from '../lib/types';
 
 function timeLabel(value?: string | null) {
@@ -47,7 +48,7 @@ export default function RecentVideoGrid({
                 }
               }} aria-label={`打开${video.title}的解析结果`}>
                 <div className="recent-cover">
-                  {video.thumbnail_url ? <img src={video.thumbnail_url} alt="" /> : <span>◈</span>}
+                  {video.thumbnail_url ? <img src={withToken(video.thumbnail_url)} alt="" /> : <span>◈</span>}
                   <button type="button" className="recent-delete" aria-label={`删除${video.title}`} title="删除解析记录" onClick={(event) => {
                     event.stopPropagation();
                     onDelete(video);

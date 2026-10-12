@@ -1,6 +1,6 @@
 'use client';
 
-import { API } from '../lib/api';
+import { apiRaw } from '../lib/api';
 import type { MediaVariant, VideoAsset } from '../lib/types';
 import { useEffect, useState } from 'react';
 
@@ -33,7 +33,7 @@ export default function DownloadAction({
     setBusy(true);
     setError('');
     try {
-      const response = await fetch(`${API}/api/videos/${video.id}/download/${variantId}`);
+      const response = await apiRaw(`/api/videos/${video.id}/download/${variantId}`);
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
         throw new Error(body.error_message || body.detail || '下载失败');

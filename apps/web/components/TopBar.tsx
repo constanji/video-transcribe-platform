@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
+import { useAuth } from '../app/providers';
 
 type MossHealth = {
   moss_reachable?: boolean;
@@ -21,6 +22,9 @@ function mossLabel(health: MossHealth | null) {
 
 export default function TopBar({ active }: { active: 'meeting' | 'parse' | 'history' | 'settings' }) {
   const [health, setHealth] = useState<MossHealth | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const { user, logout } = useAuth();
   const state = mossLabel(health);
 
   useEffect(() => {
@@ -41,6 +45,15 @@ export default function TopBar({ active }: { active: 'meeting' | 'parse' | 'hist
     };
   }, [health?.moss_model_loading, health?.moss_model_loaded]);
 
+  useEffect(() => {
+    if (!menuOpen) return;
+    function onDocClick(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) setMenuOpen(false);
+    }
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [menuOpen]);
+
   return (
     <header className="topbar">
       <a className="brand" href="/">
@@ -54,6 +67,24 @@ export default function TopBar({ active }: { active: 'meeting' | 'parse' | 'hist
         <a className={active === 'settings' ? 'active' : ''} href="/settings">设置</a>
       </nav>
       <div className={`service-state ${state.kind}`}><span /> {state.text}</div>
+      {user ? (
+        <div className="user-chip" ref={menuRef}>
+          <button type="button" onClick={() => setMenuOpen((open) => !open)}>
+            <span className="user-avatar">{(user.display_name || user.username).slice(0, 1).toUpperCase()}</span>
+            <span className="user-name">{user.display_name || user.username}</span>
+            {user.role === 'admin' ? <em className="user-role">管理员</em> : null}
+          </button>
+          {menuOpen ? (
+            <div className="user-menu">
+              <div className="user-menu-head">
+                <strong>{user.display_name || user.username}</strong>
+                <small>@{user.username}</small>
+              </div>
+              <button type="button" onClick={() => logout()}>退出登录</button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </header>
   );
 }

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api, logoSrc } from '../lib/api';
+import { withToken } from '../lib/auth';
 import type { Job, MediaVariant, Platform, VideoAsset } from '../lib/types';
 import DownloadAction from './DownloadAction';
 import SummaryAction from './SummaryAction';
@@ -228,7 +229,7 @@ export default function ParsedVideoCard({
     <section id={id} className={`result-card ${panel ? 'is-open' : ''} ${analyzeOpen ? 'is-summary' : ''} ${panel === 'download' ? 'is-download' : ''}`}>
       <div className="result-side">
         <div className="result-cover">
-          {video.thumbnail_url ? <img src={video.thumbnail_url} alt="视频封面" /> : (
+          {video.thumbnail_url ? <img src={withToken(video.thumbnail_url)} alt="视频封面" /> : (
             <div className="cover-placeholder">
               <span>◈</span>
               <small>封面将在解析器返回后显示</small>

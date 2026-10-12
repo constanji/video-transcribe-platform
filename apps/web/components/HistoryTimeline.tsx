@@ -1,6 +1,7 @@
 'use client';
 
 import { logoSrc } from '../lib/api';
+import { withToken } from '../lib/auth';
 import type { Platform, VideoAsset } from '../lib/types';
 
 const TYPE_LABEL: Record<string, string> = { parse: '解析', download: '下载', transcribe: '转录', summarize: '总结' };
@@ -58,7 +59,7 @@ export default function HistoryTimeline({
               >
                 <span className="timeline-dot" />
                 <div className="history-thumb">
-                  {item.thumbnail_url ? <img src={item.thumbnail_url} alt="" /> : <span>◈</span>}
+                  {item.thumbnail_url ? <img src={withToken(item.thumbnail_url)} alt="" /> : <span>◈</span>}
                 </div>
                 <div className="history-main">
                   <strong>{item.title}</strong>
