@@ -46,11 +46,14 @@ services:
       SUMMARY_MODEL_PATH: /models/summary/Qwen3.5-4B-Q4_K_M.gguf
       LLAMA_CLI: /usr/local/bin/llama-cli
       MOSS_PRELOAD: "1"
+      # 分块结果磁盘缓存：失败/取消后续转时复用已完成的块（挂到宿主机方便清理）。
+      MOSS_CACHE_DIR: /cache
     # 只绑回环，与服务器部署保持同一套隔离约定（api 在宿主机/同网络内访问）。
     ports: ["127.0.0.1:${MOSS_PORT:-9000}:9000"]
     volumes:
       - "${ASSET_ROOT:-../deployment-assets/models}:/models:ro"
       - ../storage:/data:ro
+      - ../storage/moss-cache:/cache
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=3)"]
       interval: 10s

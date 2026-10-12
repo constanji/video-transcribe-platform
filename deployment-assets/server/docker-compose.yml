@@ -71,10 +71,14 @@ services:
       SUMMARY_MODEL_PATH: /models/summary/Qwen3.5-4B-Q4_K_M.gguf
       LLAMA_CLI: /usr/local/bin/llama-cli
       MOSS_PRELOAD: ${MOSS_PRELOAD:-1}
+      # Chunk-result disk cache: a failed/cancelled job resumes from finished
+      # chunks instead of re-inferring the whole recording.
+      MOSS_CACHE_DIR: /cache
     volumes:
       - ${ASSET_ROOT:-/opt/plugin_parser}/models:/models:ro
       # Must share the media volume: MOSS reads the uploaded audio by path.
       - plugin_parser_storage:/data:ro
+      - moss_chunk_cache:/cache
     ports:
       - "127.0.0.1:${MOSS_PORT:-9000}:9000"
     networks:
@@ -102,3 +106,5 @@ volumes:
     name: plugin_parser_pg
   plugin_parser_storage:
     name: plugin_parser_storage
+  moss_chunk_cache:
+    name: moss_chunk_cache
