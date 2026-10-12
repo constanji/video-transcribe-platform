@@ -1131,12 +1131,63 @@ def variants(video_id: str, user: Any = Depends(get_current_user), session: Sess
     return [{"id": x.id, "format": x.format, "quality": x.quality, "media_type": x.media_type, "download_status": x.download_status, "file_size": x.file_size} for x in session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video_id)).all()]
 
 
+def _format_ts(seconds: float) -> str:
+    total = int(seconds)
+    h, remainder = divmod(max(0, total), 3600)
+    m, s = divmod(remainder, 60)
+    return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def _persist_result_files(session: Session, video_id: str, folder: Path | None) -> None:
+    """把数据库里的转录/纪要落盘成文档，让任务文件夹自包含（幂等覆盖）。"""
+    if folder is None or not folder.is_dir():
+        return
+    transcript = session.scalars(
+        select(Transcript).where(Transcript.video_asset_id == video_id).order_by(Transcript.created_at.desc())
+    ).first()
+    if transcript is not None:
+        segments = transcript.segments_json or []
+        if segments:
+            lines = []
+            for seg in segments:
+                start = seg.get("start") or seg.get("begin") or 0
+                text_part = (seg.get("text") or "").strip()
+                if text_part:
+                    lines.append(f"[{_format_ts(float(start))}] {text_part}")
+            body = "\n".join(lines) or transcript.text
+        else:
+            body = transcript.text
+        header = f"# 转录全文\n\n- 模型：{transcript.model}\n- 语言：{transcript.language}\n\n"
+        try:
+            (folder / "转录全文.txt").write_text(header + body + "\n", encoding="utf-8")
+        except OSError:
+            pass
+    video = session.get(VideoAsset, video_id)
+    summary = None
+    if video is not None and video.latest_summary_id:
+        summary = session.get(Summary, video.latest_summary_id)
+    if summary is None:
+        summary = session.scalars(
+            select(Summary).where(Summary.video_asset_id == video_id).order_by(Summary.created_at.desc())
+        ).first()
+    if summary is not None:
+        try:
+            (folder / "总结纪要.md").write_text(clean_summary_text(summary.content_markdown) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+
 def _video_file_paths(session: Session, video_id: str) -> list[tuple[str, Path]]:
     """该任务在磁盘上的候选文件：会议录音 + 各媒体变体，去重保序。"""
     candidates: list[tuple[str, Path]] = []
     meeting = session.scalars(select(Meeting).where(Meeting.video_asset_id == video_id)).first()
     if meeting is not None and meeting.audio_path:
         candidates.append(("录音文件", Path(meeting.audio_path)))
+        folder = Path(meeting.audio_path).parent
+        for name, label in (("转录全文.txt", "转录结果"), ("总结纪要.md", "总结结果")):
+            candidate = folder / name
+            if candidate.is_file():
+                candidates.append((label, candidate))
     for variant in session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video_id)).all():
         if variant.local_path and (variant.local_path != (meeting.audio_path if meeting else None)):
             label = variant.quality or variant.format or "媒体文件"
@@ -1155,16 +1206,25 @@ def _video_file_paths(session: Session, video_id: str) -> list[tuple[str, Path]]
     return files
 
 
+def _resolve_task_folder(session: Session, video_id: str) -> Path | None:
+    """确定该任务的落盘目录（录音/媒体所在目录），并懒生成转录/纪要文档。"""
+    entries = _video_file_paths(session, video_id)
+    folder = Path(entries[0][1].parent) if entries else None
+    if folder is not None:
+        _persist_result_files(session, video_id, folder)
+    return folder
+
+
 @app.get("/api/videos/{video_id}/files")
 def video_files(video_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
-    """列出该任务的落盘文件与所在目录；转录/纪要内容在数据库，走界面导出。"""
+    """列出该任务的落盘文件与所在目录；打开前把转录/纪要文档同步落盘。"""
     get_owned_video(session, user, video_id)
+    folder = _resolve_task_folder(session, video_id)
     entries = _video_file_paths(session, video_id)
-    folder = str(entries[0][1].parent) if entries else None
     folder_openable = bool(folder) and Path(folder).is_dir() and os.name == "nt"
     return {
         "video_id": video_id,
-        "folder": folder,
+        "folder": str(folder) if folder else None,
         # 只有 API 跑在本机（Windows 宿主机）时才能帮忙拉起资源管理器；容器/远程部署只能给路径。
         "folder_openable": folder_openable,
         "files": [
@@ -1178,8 +1238,7 @@ def video_files(video_id: str, user: Any = Depends(get_current_user), session: S
 def video_open_folder(video_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     """在本机资源管理器中打开任务文件夹；仅 API 与用户同机时可行。"""
     get_owned_video(session, user, video_id)
-    entries = _video_file_paths(session, video_id)
-    folder = str(entries[0][1].parent) if entries else None
+    folder = _resolve_task_folder(session, video_id)
     if not folder or not Path(folder).is_dir():
         raise HTTPException(404, "该任务没有落盘文件")
     opener = getattr(os, "startfile", None)

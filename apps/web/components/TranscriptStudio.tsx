@@ -570,7 +570,7 @@ export default function TranscriptStudio({
             ) : (
               <p className="files-folder">该任务还没有落盘文件。</p>
             )}
-            <p className="files-note">转录文本与纪要保存在数据库中，可在本面板复制或通过「导出」生成文档。</p>
+            <p className="files-note">已有转录/纪要时，打开文件夹即可看到「转录全文.txt」「总结纪要.md」；本面板内也可直接复制或通过「导出」生成文档。</p>
             <div className="detail-actions">
               {fileInfo.folder_openable && (
                 <button type="button" className="primary-button" onClick={openFolder}>

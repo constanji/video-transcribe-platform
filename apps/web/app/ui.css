@@ -302,6 +302,13 @@ a.recent-card{text-decoration:none;color:inherit;display:block}
 .status-text.is-failed{color:#a74343}
 .history-status{display:inline-flex;align-items:center;gap:5px}
 .history-status.busy{color:#1d68bb;font-weight:650}
+/* 结果徽标：有=绿、无=灰，历史/首页一眼区分 */
+.flags span.flag-on{background:#e3f4ea;color:#1d7a46}
+.flags span.flag-off{background:#f1f3f6;color:#98a2b0}
+.history-flags{display:inline-flex;gap:6px}
+.history-flags em{font-style:normal;border-radius:999px;padding:1px 7px;font-size:11px}
+.history-flags em.flag-on{background:#e3f4ea;color:#1d7a46}
+.history-flags em.flag-off{background:#f1f3f6;color:#98a2b0}
 /* 会议面板左侧：转录进行中的状态块 */
 .studio-transcribing{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:40px 18px;text-align:center;color:var(--muted)}
 .studio-transcribing h3{margin:0;font-size:15px;color:var(--text)}

@@ -62,8 +62,8 @@ export default function RecentVideoGrid({
                 <p>{timeLabel(video.last_processed_at || video.created_at)}</p>
                 <p className="status-text">{video.parse_status === 'uploaded' ? '文件已就绪' : video.parse_status === 'parsed' ? '已解析' : '待接入解析器'}</p>
                 <p className="flags">
-                  <span>{video.has_transcript ? '已有转录' : '无转录'}</span>
-                  <span>{video.has_summary ? '已有总结' : '无总结'}</span>
+                  <span className={video.has_transcript ? 'flag-on' : 'flag-off'}>{video.has_transcript ? '已有转录' : '无转录'}</span>
+                  <span className={video.has_summary ? 'flag-on' : 'flag-off'}>{video.has_summary ? '已有总结' : '无总结'}</span>
                 </p>
                 <div className="recent-actions">
                   <button type="button" onClick={(event) => { event.stopPropagation(); onDownload(video); }}>视频下载</button>

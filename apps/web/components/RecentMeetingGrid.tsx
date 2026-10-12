@@ -100,8 +100,8 @@ export default function RecentMeetingGrid({
                 <p>{timeLabel(item.updated_at || item.created_at)}</p>
                 <p className={`status-text ${item.status === 'processing' || item.status === 'summarizing' ? 'is-busy' : ''} ${item.status === 'failed' ? 'is-failed' : ''}`}>{STATUS_LABEL[item.status] || item.status}</p>
                 <p className="flags">
-                  <span>{item.has_transcript ? '已有转录' : '无转录'}</span>
-                  <span>{item.has_summary ? '已有纪要' : '无纪要'}</span>
+                  <span className={item.has_transcript ? 'flag-on' : 'flag-off'}>{item.has_transcript ? '已有转录' : '无转录'}</span>
+                  <span className={item.has_summary ? 'flag-on' : 'flag-off'}>{item.has_summary ? '已有纪要' : '无纪要'}</span>
                 </p>
               </article>
             );

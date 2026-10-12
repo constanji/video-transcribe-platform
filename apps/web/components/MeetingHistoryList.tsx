@@ -86,7 +86,10 @@ export default function MeetingHistoryList({
                 <small className={item.status === 'processing' || item.status === 'summarizing' ? 'history-status busy' : 'history-status'}>
                   {(item.status === 'processing' || item.status === 'summarizing') && <i className="badge-dot" />}
                   {STATUS_LABEL[item.status] || item.status}
-                  {item.has_summary ? ' · 纪要已完成' : ' · 纪要未完成'}
+                </small>
+                <small className="history-flags">
+                  <em className={item.has_transcript ? 'flag-on' : 'flag-off'}>{item.has_transcript ? '已转录' : '未转录'}</em>
+                  <em className={item.has_summary ? 'flag-on' : 'flag-off'}>{item.has_summary ? '纪要已完成' : '纪要未完成'}</em>
                 </small>
               </div>
             </button>
