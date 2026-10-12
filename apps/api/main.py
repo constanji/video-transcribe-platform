@@ -1476,12 +1476,17 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
     })
     result = None
     last_stage = ""
-    # 轮询上限：至少 15 分钟，或按音频时长 15x 估算。
-    # 原实现固定 900×2s（30 分钟）且循环体没有异常保护，任何一次 DB/解析异常
-    # 都会让线程静默退出，导致结果早就产出、平台却永远收不到（本次事故根因）。
-    max_polls = max(450, int((video.duration_seconds or 0) * 15))
+    # 轮询上限：至少 2 小时，或按音频时长 15x 估算。
+    # 旧下限 450×2s=15 分钟隐含「video 一定带时长」的假设，但录音导入的会议
+    # duration_seconds 为 NULL，预算直接落到 15 分钟——CPU 推理一段 45 分钟的
+    # 录音要 ~20 分钟，会在快完成时被平台误判超时（本次事故根因）。
+    # 下限提到 2 小时；时长缺失时在轮询里用 MOSS 回报的 audio_seconds 回填
+    # video 并按 15x 放大预算（range 固定长度，因此循环用 while）。
+    max_polls = max(3600, int((video.duration_seconds or 0) * 15))
     consecutive_errors = 0
-    for waited in range(max_polls):
+    waited = 0
+    while waited < max_polls:
+        waited += 1
         time.sleep(2)
         try:
             job = session.get(ProcessingJob, job.id)
@@ -1492,6 +1497,13 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
             if status.status_code >= 400:
                 raise RuntimeError(f"转录任务查询返回 HTTP {status.status_code}")
             payload = status.json()
+            moss_audio = payload.get("audio_seconds")
+            if moss_audio and not video.duration_seconds:
+                # 时长缺失（录音导入/实时录制）：用 MOSS 实测值回填，
+                # 让本轮预算和前端进度估算都基于真实时长。
+                video.duration_seconds = int(float(moss_audio))
+                session.commit()
+                max_polls = max(max_polls, int((video.duration_seconds or 0) * 15))
             moss_status = payload.get("status")
             overall, detail, _message = _transcribe_progress(payload, waited, video.duration_seconds)
             # moss_job_id 必须一直保留在 progress_json 里：轮询会整体覆盖 detail，
