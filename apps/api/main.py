@@ -120,6 +120,7 @@ class VideoAsset(Base):
     available_formats: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     latest_summary_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     last_processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     parse_status: Mapped[str] = mapped_column(String(32), default="parsed")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -216,6 +217,7 @@ class ApiKey(Base):
     revoked: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class Meeting(Base):
@@ -231,8 +233,37 @@ class Meeting(Base):
     api_key_id: Mapped[str | None] = mapped_column(ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True)
     live_segments_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    display_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    role: Mapped[str] = mapped_column(String(16), default="user")        # admin | user
+    status: Mapped[str] = mapped_column(String(16), default="active")    # active | disabled
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class UserSession(Base):
+    """refresh 令牌存储：一次性轮换 + 可撤销（登出/改密/禁用即删）。"""
+
+    __tablename__ = "user_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    refresh_token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    revoked: Mapped[bool] = mapped_column(default=False)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 Base.metadata.create_all(engine)
@@ -260,6 +291,16 @@ with engine.begin() as conn:
             conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN input_media_type VARCHAR(16)"))
         if "fallback_used" not in job_cols:
             conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN fallback_used BOOLEAN DEFAULT 0"))
+        for owner_table in ("video_assets", "meetings", "api_keys"):
+            owner_cols = {row[1] for row in conn.execute(text(f"PRAGMA table_info({owner_table})")).fetchall()}
+            if "user_id" not in owner_cols:
+                conn.execute(text(f"ALTER TABLE {owner_table} ADD COLUMN user_id VARCHAR(36)"))
+        for index_name, index_table in (
+            ("ix_video_assets_user_id", "video_assets"),
+            ("ix_meetings_user_id", "meetings"),
+            ("ix_api_keys_user_id", "api_keys"),
+        ):
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {index_table}(user_id)"))
     else:
         for statement in (
             "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS input_media_type VARCHAR(16)",
@@ -271,8 +312,46 @@ with engine.begin() as conn:
             "ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS latest_summary_id VARCHAR(36)",
             "ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS last_processed_at TIMESTAMPTZ",
             "ALTER TABLE summary_templates ADD COLUMN IF NOT EXISTS show_on_home BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
+            "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
+            "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
+            "CREATE INDEX IF NOT EXISTS ix_video_assets_user_id ON video_assets(user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_meetings_user_id ON meetings(user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_api_keys_user_id ON api_keys(user_id)",
         ):
             conn.execute(text(statement))
+
+
+def _backfill_owner(session: Session, owner_id: str) -> None:
+    """把无归属的历史数据（视频/会议/密钥）挂给指定用户（首位管理员）。"""
+    for table in ("video_assets", "meetings", "api_keys"):
+        session.execute(text(f"UPDATE {table} SET user_id = :uid WHERE user_id IS NULL"), {"uid": owner_id})
+
+
+def _bootstrap_first_admin() -> None:
+    """users 为空时：设置了 ADMIN_PASSWORD 就建管理员（平滑承接原 env 登录），
+    否则等首位注册用户成为 admin（register 端点负责回填历史数据）。"""
+    from .auth import hash_password
+
+    with SessionLocal() as session:
+        if session.scalar(select(func.count()).select_from(User)) > 0:
+            return
+        password = os.getenv("ADMIN_PASSWORD", "")
+        if not password or password == "change-me":
+            return
+        admin = User(
+            username=os.getenv("ADMIN_USERNAME", "admin"),
+            password_hash=hash_password(password),
+            display_name="管理员",
+            role="admin",
+        )
+        session.add(admin)
+        session.flush()
+        _backfill_owner(session, admin.id)
+        session.commit()
+
+
+_bootstrap_first_admin()
 
 
 class ParseRequest(BaseModel):
@@ -705,13 +784,6 @@ def warmup_moss():
 @app.get("/api/platforms")
 def platforms():
     return PLATFORMS
-
-
-@app.post("/api/auth/login")
-def login(payload: dict[str, str]):
-    if payload.get("username") != os.getenv("ADMIN_USERNAME", "admin") or payload.get("password") != os.getenv("ADMIN_PASSWORD", "change-me"):
-        raise HTTPException(401, "用户名或密码错误")
-    return {"token": os.getenv("API_SECRET", "local-dev-token"), "user": {"username": payload["username"]}}
 
 
 def _related_videos(session: Session, parsed) -> list[VideoAsset]:
@@ -1818,8 +1890,10 @@ def delete_video(video_id: str, session: Session = Depends(db_session)):
 
 
 from .meetings import register_meeting_routes
+from .auth import register_auth_routes
 
 register_meeting_routes(app)
+register_auth_routes(app)
 
 
 def _stale_seconds() -> float:
