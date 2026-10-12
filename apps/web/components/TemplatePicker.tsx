@@ -57,6 +57,7 @@ export default function TemplatePicker({
                   }}
                 >
                   <strong>{item.name}</strong>
+                  {item.is_default && <em className="template-default-hint">默认</em>}
                   {item.description && <small>{item.description}</small>}
                 </button>
               </li>

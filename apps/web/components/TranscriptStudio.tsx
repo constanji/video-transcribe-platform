@@ -482,7 +482,7 @@ export default function TranscriptStudio({
                   ...(activeTemplateId && !templates.some((item) => item.id === activeTemplateId)
                     ? [{ value: activeTemplateId, label: templateName || '当前模板', hint: '不在可用列表' }]
                     : []),
-                  ...templates.map((item) => ({ value: item.id, label: item.name })),
+                  ...templates.map((item) => ({ value: item.id, label: item.name, hint: item.is_default ? '默认' : undefined })),
                 ]}
                 onChange={changeTemplate}
               />

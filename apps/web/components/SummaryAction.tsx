@@ -76,7 +76,9 @@ export default function SummaryAction({
   useEffect(() => {
     api<Template[]>(listedTemplates === false ? '/api/templates' : '/api/templates?listed=true').then((items) => {
       setTemplates(items);
-      const preferred = items.find((item) => preferredTemplateName && item.name === preferredTemplateName)
+      // 管理员标记的默认模板最优先，其次才是调用方点名的模板与内置命名约定。
+      const preferred = items.find((item) => item.is_default)
+        || items.find((item) => preferredTemplateName && item.name === preferredTemplateName)
         || items.find((item) => item.name === '通用视频总结')
         || items.find((item) => item.name === '新闻热点')
         || items[0];

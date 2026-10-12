@@ -152,6 +152,7 @@ export type Template = {
   origin: string;
   sections: { title: string; instruction: string; format?: string; item_format?: string }[];
   show_on_home?: boolean;
+  is_default?: boolean;
   can_delete?: boolean;
 };
 

@@ -185,6 +185,7 @@ class SummaryTemplate(Base):
     sections_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     is_active: Mapped[bool] = mapped_column(default=True)
     show_on_home: Mapped[bool] = mapped_column(default=True)
+    is_default: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -283,6 +284,8 @@ with engine.begin() as conn:
         template_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(summary_templates)")).fetchall()}
         if "show_on_home" not in template_cols:
             conn.execute(text("ALTER TABLE summary_templates ADD COLUMN show_on_home BOOLEAN DEFAULT 1"))
+        if "is_default" not in template_cols:
+            conn.execute(text("ALTER TABLE summary_templates ADD COLUMN is_default BOOLEAN DEFAULT 0"))
         job_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(processing_jobs)")).fetchall()}
         if "logs_json" not in job_cols:
             conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN logs_json JSON"))
@@ -313,6 +316,7 @@ with engine.begin() as conn:
             "ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS latest_summary_id VARCHAR(36)",
             "ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS last_processed_at TIMESTAMPTZ",
             "ALTER TABLE summary_templates ADD COLUMN IF NOT EXISTS show_on_home BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE summary_templates ADD COLUMN IF NOT EXISTS is_default BOOLEAN DEFAULT FALSE",
             "ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
             "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
             "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
@@ -371,6 +375,7 @@ class TemplateRequest(BaseModel):
     description: str | None = None
     sections: list[dict[str, Any]] | None = None
     show_on_home: bool | None = None
+    is_default: bool | None = None
 
 
 app = FastAPI(title="Video Transcribe Platform API", version="0.1.0")
@@ -680,6 +685,7 @@ def template_dict(item: SummaryTemplate) -> dict[str, Any]:
         "origin": item.origin,
         "sections": item.sections_json or [],
         "show_on_home": bool(item.show_on_home),
+        "is_default": bool(item.is_default),
         "can_delete": item.origin != "builtin",
     }
 
@@ -709,6 +715,23 @@ def seed_builtin_templates() -> None:
                     show_on_home=item["name"] in HOME_DEFAULT_NAMES,
                 ))
         session.commit()
+        _ensure_single_default_template(session)
+
+
+def _ensure_single_default_template(session: Session) -> None:
+    """保证「有且仅有一个默认模板」：没有默认时挑第一个可用模板补位，多个时保留首个。
+
+    空库/删掉默认模板后由这里自动补位，前端预选永远有据可依。
+    """
+    rows = list(session.scalars(
+        select(SummaryTemplate).where(SummaryTemplate.is_active.is_(True)).order_by(SummaryTemplate.created_at)
+    ).all())
+    defaults = [row for row in rows if row.is_default]
+    if not defaults and rows:
+        rows[0].is_default = True
+    for extra in defaults[1:]:
+        extra.is_default = False
+    session.commit()
 
 
 seed_builtin_templates()
@@ -1962,6 +1985,15 @@ def put_settings(group: str, payload: dict[str, Any], _: Any = Depends(require_a
     return config_endpoint(group, session, payload)
 
 
+def _make_default_template(session: Session, template: SummaryTemplate) -> None:
+    """设为默认并清掉其它模板的默认标记（全局唯一默认）。"""
+    template.is_default = True
+    for other in session.scalars(
+        select(SummaryTemplate).where(SummaryTemplate.id != template.id, SummaryTemplate.is_default.is_(True))
+    ).all():
+        other.is_default = False
+
+
 @app.post("/api/templates")
 def create_template(request: TemplateRequest, _: Any = Depends(require_admin), session: Session = Depends(db_session)):
     if not (request.name or "").strip():
@@ -1975,6 +2007,11 @@ def create_template(request: TemplateRequest, _: Any = Depends(require_admin), s
     )
     session.add(template)
     session.commit()
+    if request.is_default:
+        _make_default_template(session, template)
+        session.commit()
+    else:
+        _ensure_single_default_template(session)
     session.refresh(template)
     return template_dict(template)
 
@@ -1994,6 +2031,12 @@ def update_template(template_id: str, request: TemplateRequest, _: Any = Depends
         template.sections_json = request.sections
     if request.show_on_home is not None:
         template.show_on_home = request.show_on_home
+    if request.is_default is not None:
+        if request.is_default:
+            _make_default_template(session, template)
+        else:
+            template.is_default = False
+            _ensure_single_default_template(session)
     session.commit()
     return template_dict(template)
 
@@ -2022,8 +2065,13 @@ def delete_template(template_id: str, _: Any = Depends(require_admin), session: 
         raise HTTPException(404, "模板不存在")
     if template.origin == "builtin":
         raise HTTPException(400, "内置模板不可删除，可以关闭首页显示或恢复默认")
+    was_default = bool(template.is_default)
     template.is_active = False
+    if was_default:
+        template.is_default = False
     session.commit()
+    if was_default:
+        _ensure_single_default_template(session)
     return {"deleted": template_id}
 
 

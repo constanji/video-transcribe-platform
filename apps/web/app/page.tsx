@@ -47,7 +47,9 @@ export default function MeetingHomePage() {
   useEffect(() => {
     api<Template[]>('/api/templates?listed=true').then((items) => {
       setTemplates(items);
-      const preferred = items.find((item) => item.name === '标准会议纪要')
+      // 管理员标记的默认模板优先；没有时退回内置命名约定。
+      const preferred = items.find((item) => item.is_default)
+        || items.find((item) => item.name === '标准会议纪要')
         || items.find((item) => item.name === '通用视频总结')
         || items[0];
       setTemplateId(preferred?.id || '');

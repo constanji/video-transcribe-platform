@@ -30,6 +30,20 @@ export default function TemplateSettings({
     replace(saved);
   }
 
+  // 全局唯一默认：设为默认后其它模板自动让位；取消时后端会自动补位第一个可用模板。
+  async function toggleDefault(item: Template) {
+    const saved = await api<Template>(`/api/templates/${item.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ is_default: !item.is_default }),
+    });
+    onTemplates(templates.map((entry) => (
+      entry.id === saved.id
+        ? saved
+        : { ...entry, is_default: saved.is_default ? false : entry.is_default }
+    )));
+    onToast(saved.is_default ? `已把「${saved.name}」设为默认模板` : '已取消默认模板');
+  }
+
   async function duplicate(item: Template) {
     const saved = await api<Template>('/api/templates', {
       method: 'POST',
@@ -63,7 +77,7 @@ export default function TemplateSettings({
       <div className="template-config-head">
         <div>
           <h2>模板配置</h2>
-          <p className="settings-intro">增删改总结模板。打开「首页显示」后，才会出现在工作台的模板列表里。</p>
+          <p className="settings-intro">增删改总结模板。打开「首页显示」后才会出现在工作台；「默认」模板会在生成摘要时自动预选。</p>
         </div>
         <button
           type="button"
@@ -84,10 +98,16 @@ export default function TemplateSettings({
               </div>
               <p>{item.description || '暂无说明'}</p>
             </div>
-            <label className="template-switch">
-              <input type="checkbox" checked={item.show_on_home !== false} onChange={() => toggleHome(item)} />
-              首页显示
-            </label>
+            <div className="template-switch-group">
+              <label className="template-switch">
+                <input type="checkbox" checked={item.show_on_home !== false} onChange={() => toggleHome(item)} />
+                首页显示
+              </label>
+              <label className="template-switch">
+                <input type="checkbox" checked={item.is_default === true} onChange={() => toggleDefault(item)} />
+                默认
+              </label>
+            </div>
           </div>
           <div className="template-card-actions">
             <button type="button" className="outline-button" onClick={() => { setEditingTemplate(item); setEditing(true); }}>编辑</button>

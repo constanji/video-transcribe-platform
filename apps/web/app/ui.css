@@ -26,6 +26,8 @@
 .template-menu li button.selected{background:var(--accent);color:#fff}
 .template-menu li button.selected small{color:rgba(255,255,255,.82)}
 .template-menu li button strong{font-size:13px;font-weight:650}
+.template-default-hint{align-self:flex-start;font-style:normal;font-size:11px;font-weight:650;color:var(--accent);background:var(--accent-soft);border-radius:6px;padding:1px 6px}
+.template-menu li button.selected .template-default-hint{color:#fff;background:rgba(255,255,255,.22)}
 .template-empty{padding:12px;color:var(--muted);font-size:13px}
 .template-add{width:100%;border:0;border-top:1px solid var(--line);background:#fff;padding:12px 14px;text-align:left;color:var(--accent);font-size:13px;font-weight:650;cursor:pointer}
 .template-add:hover{background:var(--accent-soft)}
@@ -316,3 +318,4 @@ a.recent-card{text-decoration:none;color:inherit;display:block}
 .files-list li small{flex:none;color:var(--muted);font-size:12px}
 .files-note{font-size:12px;color:var(--muted);margin:10px 0 0}
 .files-box .detail-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+.template-switch-group{display:flex;align-items:center;gap:14px}
