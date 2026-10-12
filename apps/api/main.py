@@ -1232,6 +1232,68 @@ def _moss_busy_message(settings: dict[str, Any] | None = None) -> str | None:
     return None
 
 
+def _cancel_moss_transcription(moss_url: str, moss_id: str | None) -> bool:
+    """尽力取消 MOSS 侧转录任务，把全局推理锁放掉。
+
+    本地放弃（超时 / 连续轮询失败 / 取消）时 MOSS 往往还在推理，不取消的话
+    它会一直占着唯一的推理锁，之后所有任务——包括本任务的重试——都被
+    busy 挡在门外（正是「失败后重试仍提示正忙于另一个任务」的根因）。
+    """
+    if not moss_id:
+        return False
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            client.delete(f"{moss_url}/v1/transcriptions/{moss_id}")
+        return True
+    except Exception:  # noqa: BLE001 - MOSS 不可用时不能阻塞主流程
+        return False
+
+
+def _reclaim_stale_moss_lock(moss: dict[str, Any]) -> bool:
+    """MOSS 报 busy 时，若忙的其实是本平台已终态任务的僵尸锁，就取消它把锁抢回。
+
+    判定依据：busy_job 能在本平台已失败/已取消任务的 progress_json.moss_job_id
+    里找到。属主已死但 MOSS 还在推理（典型：转录超时），这个锁纯属僵尸。
+    抢不到（真是别人的在途任务或身份不明）时返回 False，由调用方继续报 409。
+    """
+    busy_job = moss.get("busy_job")
+    if not busy_job:
+        return False
+    with SessionLocal() as session:
+        stale = False
+        for job in session.scalars(
+            select(ProcessingJob).where(ProcessingJob.status.in_(("failed", "cancelled")))
+        ).all():
+            if (job.progress_json or {}).get("moss_job_id") == busy_job:
+                stale = True
+                break
+    if not stale:
+        return False
+    return _cancel_moss_transcription(moss_service_url(current_transcription()), busy_job)
+
+
+def ensure_moss_available(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    """转录前置检查：MOSS 可达、模型就绪、推理锁没被本平台的僵尸任务占着。"""
+    config = settings or current_transcription()
+    url = moss_service_url(config)
+    moss = probe_moss(url)
+    if not moss.get("reachable"):
+        raise HTTPException(503, "转录服务未连接，请先启动本机 MOSS")
+    if not moss.get("model_loaded"):
+        detail = moss.get("warmup_error") or ("模型正在加载，请稍后再试" if moss.get("model_loading") else "转录模型尚未加载")
+        raise HTTPException(409, str(detail))
+    if moss.get("busy") and _reclaim_stale_moss_lock(moss):
+        # DELETE 后 MOSS 的 job 线程要 unwind 才清 _busy_job，轮询几次再放行。
+        for _ in range(6):
+            time.sleep(1.5)
+            moss = probe_moss(url)
+            if not moss.get("busy"):
+                break
+    if moss.get("busy"):
+        raise HTTPException(409, f"转录服务正忙于另一个任务（{moss.get('busy_job') or '未知任务'}），请等它完成或取消后再开始")
+    return config
+
+
 @app.delete("/api/jobs/{job_id}")
 def cancel_job(job_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     """取消在途任务：MOSS 侧会 kill 掉推理子进程，立即释放推理锁。"""
@@ -1258,14 +1320,7 @@ def transcribe(video_id: str, payload: dict[str, Any] | None = None, user: Any =
     video = get_owned_video(session, user, video_id)
     body = payload or {}
     settings = current_transcription()
-    moss = probe_moss(moss_service_url(settings))
-    if not moss.get("reachable"):
-        raise HTTPException(503, "转录服务未连接，请先启动本机 MOSS")
-    if not moss.get("model_loaded"):
-        detail = moss.get("warmup_error") or ("模型正在加载，请稍后再试" if moss.get("model_loading") else "转录模型尚未加载")
-        raise HTTPException(409, str(detail))
-    if moss.get("busy"):
-        raise HTTPException(409, f"转录服务正忙于另一个任务（{moss.get('busy_job') or '未知任务'}），请等待或取消后再开始")
+    ensure_moss_available(settings)
     language = (body.get("transcription") or {}).get("language") or settings.get("default_language") or "zh"
     if language not in {"zh", "auto", "en"}:
         raise HTTPException(400, "不支持的转录语言")
@@ -1465,6 +1520,8 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
                 try:
                     current = session.get(ProcessingJob, job.id)
                     if current:
+                        # 同样可能只是查不动状态而 MOSS 仍在推理，取消放锁后再判失败。
+                        _cancel_moss_transcription(moss_url, moss_id)
                         _fail_job(session, current, f"连续 {consecutive_errors} 次轮询转录服务失败：{exc}", "transcribing")
                 except Exception:
                     pass
@@ -1478,6 +1535,9 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
             _fail_job(session, job, payload.get("error") or payload.get("message") or "转录失败", "transcribing")
             return None
     if result is None:
+        # 超时放弃时 MOSS 侧往往还在推理：必须先取消把全局推理锁放掉，
+        # 否则之后所有任务（包括本任务的重试）都被 busy 挡在门外。
+        _cancel_moss_transcription(moss_url, moss_id)
         _fail_job(session, job, "转录超时，请稍后重试", "transcribing")
         return None
     transcript = _save_transcript(session, job, result, language)
@@ -1737,8 +1797,11 @@ def retry_job(job_id: str, user: Any = Depends(get_current_user), session: Sessi
 
 
 @app.post("/api/jobs/{job_id}/cancel")
-def cancel_job(job_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+def cancel_job_compat(job_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    """兼容旧入口：与 DELETE /api/jobs/{id} 等价，同样要放掉 MOSS 推理锁。"""
     job = get_owned_job(session, user, job_id)
+    if job.status not in {"completed", "failed", "cancelled"}:
+        _cancel_moss_transcription(moss_service_url(current_transcription()), (job.progress_json or {}).get("moss_job_id"))
     job.status, job.current_stage = "cancelled", "cancelled"
     session.commit(); return job_dict(job)
 

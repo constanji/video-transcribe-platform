@@ -220,19 +220,12 @@ def meeting_dict(session: Session, meeting) -> dict[str, Any]:
 
 
 def require_moss_ready() -> dict[str, Any]:
-    from .main import current_transcription, moss_service_url, probe_moss
+    from .main import ensure_moss_available
 
-    settings = current_transcription()
-    moss = probe_moss(moss_service_url(settings))
-    if not moss.get("reachable"):
-        raise HTTPException(503, "转录服务未连接，请先启动本机 MOSS")
-    if not moss.get("model_loaded"):
-        detail = moss.get("warmup_error") or ("模型正在加载，请稍后再试" if moss.get("model_loading") else "转录模型尚未加载")
-        raise HTTPException(409, str(detail))
-    if moss.get("busy"):
-        # 排队等于让用户干等几小时，宁可当场说清楚。
-        raise HTTPException(409, f"转录服务正忙于另一个任务（{moss.get('busy_job') or '未知任务'}），请等它完成或取消后再开始")
-    return settings
+    # 统一前置检查里带僵尸锁回收：本平台已失败/已取消的任务若还在 MOSS 侧
+    # 占着推理锁（典型：转录超时），直接取消抢回，别让用户的重试永远被
+    # 「正忙于另一个任务」挡住。
+    return ensure_moss_available()
 
 
 def start_final_transcribe(session: Session, meeting) -> Any:
