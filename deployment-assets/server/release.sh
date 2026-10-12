@@ -213,6 +213,7 @@ EXCLUDES=(
   --exclude=./.pytest_cache --exclude=./.mypy_cache --exclude=./.ruff_cache
   --exclude='*/__pycache__' --exclude='*.pyc'
   --exclude=./.env --exclude='*.db' --exclude='*.db-*'
+  --exclude=./.tmp --exclude='./.tmp/*'
 )
 
 tar -cf - -C "$REPO_ROOT" "${EXCLUDES[@]}" . | tar -xf - -C "$STAGE"
