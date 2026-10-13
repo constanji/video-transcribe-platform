@@ -25,6 +25,10 @@ export function deleteMeeting(id: string) {
   return api<{ deleted: string }>(`/api/v1/meetings/${id}`, { method: 'DELETE' });
 }
 
+export function renameMeeting(id: string, title: string) {
+  return api<MeetingRecord>(`/api/v1/meetings/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) });
+}
+
 export function stopMeeting(id: string) {
   return api<MeetingRecord>(`/api/v1/meetings/${id}/stop`, { method: 'POST' });
 }

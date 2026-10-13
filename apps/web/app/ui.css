@@ -300,6 +300,13 @@ a.recent-card{text-decoration:none;color:inherit;display:block}
 @keyframes badge-dot-blink{0%,100%{opacity:1}50%{opacity:.25}}
 .status-text.is-busy{color:#1d68bb;font-weight:650}
 .status-text.is-failed{color:#a74343}
+/* 会议卡片标题：hover 出铅笔进入行内改名 */
+.meeting-title{display:flex;align-items:center;gap:6px}
+.title-edit-btn{border:0;background:transparent;color:#9aa3af;cursor:pointer;font-size:12px;padding:0 2px;line-height:1;opacity:0;transition:opacity .12s}
+.recent-card:hover .title-edit-btn,.title-edit-btn:focus{opacity:1}
+.title-edit-btn:hover{color:var(--accent)}
+.meeting-title-input{width:100%;font-size:14px;font-weight:650;font-family:inherit;color:var(--text);border:1px solid var(--accent);border-radius:7px;padding:4px 8px;background:#fff;outline:2px solid #c5ddfb;outline-offset:1px}
+
 .history-status{display:inline-flex;align-items:center;gap:5px}
 .history-status.busy{color:#1d68bb;font-weight:650}
 /* 结果徽标：有=绿、无=灰，历史/首页一眼区分 */

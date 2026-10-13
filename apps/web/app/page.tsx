@@ -7,7 +7,7 @@ import Toast from '../components/Toast';
 import TopBar from '../components/TopBar';
 import TranscriptStudio from '../components/TranscriptStudio';
 import { api } from '../lib/api';
-import { deleteMeeting, listMeetings } from '../lib/meeting-api';
+import { deleteMeeting, listMeetings, renameMeeting } from '../lib/meeting-api';
 import type { MeetingHistoryItem, Platform, SummarySettings, Template } from '../lib/types';
 
 const MEETINGS_POLL_MS = 15000;
@@ -80,6 +80,19 @@ export default function MeetingHomePage() {
     }
   }
 
+  // 重命名同样乐观更新；标题在首页卡片、历史列表与纪要落盘文档间共用。
+  async function renameMeetingItem(item: MeetingHistoryItem, title: string) {
+    const previous = meetings;
+    setMeetings((current) => current.map((entry) => (entry.id === item.id ? { ...entry, title } : entry)));
+    try {
+      await renameMeeting(item.id, title);
+      setToast({ message: '已重命名会议', kind: 'success' });
+    } catch (err) {
+      setMeetings(previous);
+      setToast({ message: (err as Error).message, kind: 'error' });
+    }
+  }
+
   return (
     <main className="page-shell upload-page">
       <TopBar active="meeting" />
@@ -99,6 +112,7 @@ export default function MeetingHomePage() {
           setStudioMeetingId(item.id);
         }}
         onDelete={removeMeeting}
+        onRename={renameMeetingItem}
       />
       {studioVideoId && (
         <TranscriptStudio

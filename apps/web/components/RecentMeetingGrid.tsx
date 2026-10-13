@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import type { MeetingHistoryItem } from '../lib/types';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -32,14 +33,70 @@ function timeLabel(value?: string | null) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
+function TitleEditor({
+  item,
+  onRename,
+}: {
+  item: MeetingHistoryItem;
+  onRename?: (item: MeetingHistoryItem, title: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  if (!editing) {
+    return (
+      <h3 className="meeting-title">
+        {item.title}
+        {onRename && (
+          <button
+            type="button"
+            className="title-edit-btn"
+            aria-label={`重命名会议「${item.title}」`}
+            title="重命名"
+            onClick={(event) => {
+              event.stopPropagation();
+              setDraft(item.title);
+              setEditing(true);
+            }}
+          >✎</button>
+        )}
+      </h3>
+    );
+  }
+  const commit = () => {
+    const title = draft.trim();
+    setEditing(false);
+    if (title && title !== item.title) onRename?.(item, title);
+  };
+  return (
+    <input
+      className="meeting-title-input"
+      value={draft}
+      autoFocus
+      maxLength={200}
+      aria-label="编辑会议名称"
+      onClick={(event) => event.stopPropagation()}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.key === 'Enter') commit();
+        if (event.key === 'Escape') setEditing(false);
+      }}
+    />
+  );
+}
+
 export default function RecentMeetingGrid({
   meetings,
   onOpen,
   onDelete,
+  onRename,
 }: {
   meetings: MeetingHistoryItem[];
   onOpen?: (item: MeetingHistoryItem) => void;
   onDelete?: (item: MeetingHistoryItem) => void;
+  onRename?: (item: MeetingHistoryItem, title: string) => void;
 }) {
   return (
     <section className="library-panel recent-panel">
@@ -95,7 +152,7 @@ export default function RecentMeetingGrid({
                     >×</button>
                   )}
                 </div>
-                <h3>{item.title}</h3>
+                <TitleEditor item={item} onRename={onRename} />
                 <p>{MODE_LABEL[item.mode] || item.mode}{duration ? ` · ${duration}` : ''}</p>
                 <p>{timeLabel(item.updated_at || item.created_at)}</p>
                 <p className={`status-text ${item.status === 'processing' || item.status === 'summarizing' ? 'is-busy' : ''} ${item.status === 'failed' ? 'is-failed' : ''}`}>{STATUS_LABEL[item.status] || item.status}</p>

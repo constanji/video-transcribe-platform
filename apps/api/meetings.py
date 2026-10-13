@@ -50,6 +50,10 @@ class SummaryMeetingRequest(BaseModel):
     template_id: str | None = None
 
 
+class RenameMeetingRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -540,6 +544,25 @@ def list_meetings(request: Request, session: Session = Depends(get_db), auth=Dep
 @router.get("/api/v1/meetings/{meeting_id}")
 def get_meeting(meeting_id: str, request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
     meeting = get_owned_meeting(session, auth, meeting_id)
+    return meeting_dict(session, meeting)
+
+
+@router.patch("/api/v1/meetings/{meeting_id}")
+def rename_meeting(meeting_id: str, payload: RenameMeetingRequest, request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
+    from .main import VideoAsset
+
+    meeting = get_owned_meeting(session, auth, meeting_id)
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(400, "会议名称不能为空")
+    meeting.title = title
+    meeting.updated_at = _now()
+    # 关联的视频资产同步改名：历史任务列表/文件弹窗/纪要落盘标题保持一致。
+    if meeting.video_asset_id:
+        video = session.get(VideoAsset, meeting.video_asset_id)
+        if video is not None:
+            video.title = title
+    session.commit()
     return meeting_dict(session, meeting)
 
 
