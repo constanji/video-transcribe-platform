@@ -444,7 +444,20 @@ _NOISE_LINE_RE = re.compile(
 _BLOCK_ART_RE = re.compile(r"^[\s█░▒▓▄▀━─│|/\\-]+$")
 
 
-def clean_summary_text(raw: str | None) -> str:
+def _strip_instruction_echo(text: str, section_titles: list[str]) -> str:
+    """小模型常把 prompt 里的章节指令复述一遍再写正文；第一个章节标题出现两次时，从第二次出现处截取正文。"""
+    for title in section_titles:
+        needle = str(title or "").strip()
+        if not needle:
+            continue
+        pattern = rf"(?m)^#{{0,3}}\s*{re.escape(needle)}\s*$"
+        positions = [m.start() for m in re.finditer(pattern, text)]
+        if len(positions) >= 2:
+            return text[positions[1]:].strip()
+    return text
+
+
+def clean_summary_text(raw: str | None, section_titles: list[str] | None = None) -> str:
     original = (raw or "").replace("\r\n", "\n").strip()
     if not original:
         return ""
@@ -469,6 +482,8 @@ def clean_summary_text(raw: str | None) -> str:
         text = text[heading.start():].strip()
     elif re.search(r"(?i)loading model|available commands:|\[start thinking\]|thinking process:", original):
         return ""
+    if section_titles:
+        text = _strip_instruction_echo(text, section_titles)
     return text.strip()
 
 
@@ -1821,7 +1836,7 @@ def _wait_summary(session: Session, job: ProcessingJob, settings: dict[str, Any]
 
 def _summary_user_prompt(template: SummaryTemplate | None, text: str, title: str) -> str:
     sections = (template.sections_json if template else None) or [{"title": "摘要", "instruction": "概括主要内容"}]
-    lines = [f"请总结视频「{title}」的转写。按以下章节输出 Markdown："]
+    lines = [f"请总结视频「{title}」的转写。按以下章节输出 Markdown；章节列表只是格式要求，直接输出正文，禁止复述章节标题下的说明文字："]
     for item in sections:
         lines.append(f"## {item.get('title')}\n{item.get('instruction') or ''}")
     lines.extend(["", "转写：", text[:14000]])
@@ -1831,6 +1846,7 @@ def _summary_user_prompt(template: SummaryTemplate | None, text: str, title: str
 def _generate_summary(session: Session, job: ProcessingJob, video: VideoAsset, transcript: Transcript, template_id: str | None) -> None:
     settings = merge_settings("transcription", (session.get(ConfigRecord, "transcription") or ConfigRecord(key="transcription", value_json={})).value_json)
     template = session.get(SummaryTemplate, template_id) if template_id else None
+    section_titles = [str(item.get("title") or "") for item in ((template.sections_json if template else None) or [{"title": "摘要"}])]
     if not transcript.text.strip():
         _fail_job(session, job, "转录结果为空，无法生成总结", "summarizing")
         return
@@ -1842,7 +1858,7 @@ def _generate_summary(session: Session, job: ProcessingJob, video: VideoAsset, t
     provider = str(settings.get("default_provider") or "local")
     try:
         content, model = _wait_summary(session, job, settings, template, transcript, video.title)
-        content = clean_summary_text(content)
+        content = clean_summary_text(content, section_titles)
         if not content:
             raise RuntimeError("总结模型没有返回可用结果，请重试")
     except Exception as exc:

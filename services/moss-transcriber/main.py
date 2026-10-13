@@ -1065,7 +1065,7 @@ def _summary_prompt(request: SummaryRequest) -> str:
         "你是视频总结助手。根据转写用简体中文输出 Markdown，不要解释写作过程。",
         f"视频标题：{request.title or '未命名视频'}",
         f"模板：{request.template_name or '通用摘要'}",
-        "必须按下面的章节输出：",
+        "必须按下面的章节输出。注意：下面的章节列表只是格式要求，直接输出正文，禁止复述章节标题下的说明文字。",
     ]
     for item in sections:
         title = str(item.get("title") or "小节").strip()
@@ -1117,7 +1117,20 @@ def _after_prompt(text: str) -> str:
     return text[last + len(marker):].lstrip()
 
 
-def _clean_summary(raw: str) -> str:
+def _strip_instruction_echo(text: str, section_titles: list[str]) -> str:
+    """小模型常把 prompt 里的章节指令复述一遍再写正文；第一个章节标题出现两次时，从第二次出现处截取正文。"""
+    for title in section_titles:
+        needle = str(title or "").strip()
+        if not needle:
+            continue
+        pattern = rf"(?m)^#{{0,3}}\s*{re.escape(needle)}\s*$"
+        positions = [m.start() for m in re.finditer(pattern, text)]
+        if len(positions) >= 2:
+            return text[positions[1]:].strip()
+    return text
+
+
+def _clean_summary(raw: str, section_titles: list[str] | None = None) -> str:
     original = (raw or "").replace("\r\n", "\n").strip()
     if not original:
         return ""
@@ -1128,6 +1141,8 @@ def _clean_summary(raw: str) -> str:
         text = text[heading.start():].strip()
     elif re.search(r"(?i)loading model|available commands:|\[start thinking\]|thinking process:", original):
         return ""
+    if section_titles:
+        text = _strip_instruction_echo(text, section_titles)
     return text.strip()
 
 
@@ -1183,7 +1198,7 @@ def summarize(request: SummaryRequest):
     if completed.returncode != 0:
         detail = (stderr_text or stdout_text or "llama-cli 失败").strip()[-800:]
         raise HTTPException(500, detail)
-    text = _clean_summary(stdout_text or "")
+    text = _clean_summary(stdout_text or "", [str(item.get("title") or "") for item in (request.sections or [])])
     if not text:
         raise HTTPException(500, "总结模型没有返回内容")
     return {"text": text, "model": SUMMARY_MODEL_PATH.name, "engine": "llama-cli"}
