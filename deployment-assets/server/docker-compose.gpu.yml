@@ -1,0 +1,23 @@
+# GPU overlay for hosts with an NVIDIA GPU (e.g. RTX 4090).
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# Requires NVIDIA driver >= 550 and NVIDIA Container Toolkit on the host.
+# The MOSS runtime image must be built with TORCH_VARIANT=cu121 (see
+# deploy/moss.Dockerfile); the app auto-detects cuda via torch.cuda.is_available().
+
+services:
+  moss:
+    environment:
+      # Force FunASR onto the GPU; remove to fall back to auto-detection.
+      MOSS_DEVICE: cuda
+      # Keep llama-cli (summary model) on CPU by default: 4B Q4 generates in
+      # ~30-60s on server CPUs and a CUDA llama.cpp build would triple the
+      # image build time. Promote to GPU later by rebuilding with
+      # -DGGML_CUDA=ON and adding appropriate flags here if needed.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

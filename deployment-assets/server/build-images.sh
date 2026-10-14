@@ -12,6 +12,9 @@ APT_MIRROR="${APT_MIRROR:-deb.debian.org}"
 PIP_INDEX="${PIP_INDEX:-https://pypi.org/simple/}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org}"
 TORCH_WHEEL_URL="${TORCH_WHEEL_URL:-}"
+# TORCH_VARIANT=cpu (default) | cu121 — use cu121 when the target host has an
+# NVIDIA GPU (see deployment-assets/server/docker-compose.gpu.yml).
+TORCH_VARIANT="${TORCH_VARIANT:-cpu}"
 LLAMA_REPO="${LLAMA_REPO:-https://github.com/ggml-org/llama.cpp.git}"
 LLAMA_TAG="${LLAMA_TAG:-}"
 
@@ -34,6 +37,7 @@ build_one video-platform-web deploy/web.Dockerfile apps/web web.tar.gz \
 build_one video-platform-moss deploy/moss.Dockerfile . moss.tar.gz \
   --build-arg "APT_MIRROR=${APT_MIRROR}" --build-arg "PIP_INDEX=${PIP_INDEX}" \
   --build-arg "TORCH_WHEEL_URL=${TORCH_WHEEL_URL}" \
+  --build-arg "TORCH_VARIANT=${TORCH_VARIANT}" \
   --build-arg "LLAMA_REPO=${LLAMA_REPO}" --build-arg "LLAMA_TAG=${LLAMA_TAG}"
 
 echo "Images written to $OUT"

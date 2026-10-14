@@ -28,6 +28,9 @@ ARG PIP_INDEX=https://pypi.org/simple/
 # CPU-only torch wheel. When set, it is fetched with curl (much faster than pip
 # for some mirrors); leave empty to install "torch" from PIP_INDEX.
 ARG TORCH_WHEEL_URL=
+# TORCH_VARIANT=cpu (default) installs plain torch; "cu121" installs the CUDA
+# 12.1 build from the official PyTorch index so FunASR can run on GPU.
+ARG TORCH_VARIANT=cpu
 ENV MOSS_PRELOAD=1
 ENV LLAMA_CLI=/usr/local/bin/llama-cli
 RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
@@ -40,6 +43,8 @@ RUN if [ -n "${TORCH_WHEEL_URL}" ]; then \
         && curl -fL --retry 3 --retry-delay 3 -o "$f" "${TORCH_WHEEL_URL}" \
         && pip install --no-cache-dir "$f" \
         && rm -f "$f"; \
+    elif [ "${TORCH_VARIANT}" = "cu121" ]; then \
+        pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121; \
     else \
         pip install --no-cache-dir -i "${PIP_INDEX}" torch; \
     fi
