@@ -7,12 +7,14 @@ export default function LinkParserCard({
   loading,
   onUrlChange,
   onParse,
+  onCancel,
   children,
 }: {
   url: string;
   loading: boolean;
   onUrlChange: (value: string) => void;
   onParse: () => void;
+  onCancel?: () => void;
   children: ReactNode;
 }) {
   return (
@@ -27,13 +29,16 @@ export default function LinkParserCard({
         <span className="url-icon" aria-hidden>↗</span>
         <input
           value={url}
+          disabled={loading}
           onChange={(event) => onUrlChange(event.target.value)}
-          onKeyDown={(event) => event.key === 'Enter' && onParse()}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !loading) onParse();
+          }}
           placeholder="粘贴 B 站、抖音、YouTube 等视频链接"
           aria-label="视频链接"
         />
-        <button type="button" onClick={onParse} disabled={loading || !url.trim()}>
-          {loading ? '解析中…' : '解析'} <b>→</b>
+        <button type="button" onClick={loading ? onCancel : onParse} disabled={!loading && !url.trim()}>
+          {loading ? '取消解析' : '解析'} <b>→</b>
         </button>
       </div>
       <div className="url-foot">

@@ -36,6 +36,8 @@ export default function SummaryProgress({
   showStart,
   startDisabled,
   onStart,
+  onCancel,
+  cancelDisabled,
 }: {
   job: Job | null;
   startLabel: string;
@@ -43,6 +45,8 @@ export default function SummaryProgress({
   showStart?: boolean;
   startDisabled?: boolean;
   onStart?: () => void;
+  onCancel?: () => void;
+  cancelDisabled?: boolean;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const logs = job?.logs || [];
@@ -50,7 +54,9 @@ export default function SummaryProgress({
   const done = job?.status === 'completed';
   const running = Boolean(job && !failed && !done);
   const detail = job?.progress_detail;
-  const current = detail?.message || (logs.length ? logs[logs.length - 1].message : showStart ? `点击下方「${startLabel}」开始` : '选择上方「转录」或「总结」查看日志');
+  const current = failed
+    ? job?.error_message || detail?.message || (logs.length ? logs[logs.length - 1].message : '任务失败')
+    : detail?.message || (logs.length ? logs[logs.length - 1].message : showStart ? `点击下方「${startLabel}」开始` : '选择上方「转录」或「总结」查看日志');
   const value = job ? percent(job) : 0;
   const meta = [
     detail?.audio_seconds ? `音频 ${durationLabel(detail.audio_seconds)}` : '',
@@ -74,7 +80,14 @@ export default function SummaryProgress({
         </div>
         <em>{job ? `${value}%` : '待开始'}</em>
       </div>
-      <div className="summary-progress-bar" aria-hidden>
+      <div
+        className="summary-progress-bar"
+        role="progressbar"
+        aria-label={current}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={value}
+      >
         <i className={running && value < 8 ? 'indeterminate' : ''} style={{ width: `${Math.max(value, running ? 6 : 0)}%` }} />
       </div>
       <div className="summary-log-stream" ref={scroller}>
@@ -88,6 +101,9 @@ export default function SummaryProgress({
         )}
         {!showStart && !job && <p className="summary-log-empty">还没有日志。选择上方「转录」或「总结」查看对应任务。</p>}
         {job && logs.length === 0 && !showStart && <p className="summary-log-empty">任务已创建，正在等待第一条日志…</p>}
+        {failed && job?.error_message && !logs.some((item) => item.message === job.error_message) && (
+          <div className="summary-log-item error"><time>失败</time><p>{job.error_message}</p></div>
+        )}
         {logs.map((item, index) => (
           <div className={`summary-log-item ${item.level}`} key={`${item.at}-${index}`}>
             <time dateTime={item.at}>{clock(item.at)}</time>
@@ -100,6 +116,13 @@ export default function SummaryProgress({
               {startLabel}
             </button>
             {startHint && <p>{startHint}</p>}
+          </div>
+        )}
+        {running && onCancel && (
+          <div className="summary-log-retry">
+            <button type="button" className="outline-button" onClick={onCancel} disabled={cancelDisabled}>
+              {cancelDisabled ? '正在取消…' : '取消任务'}
+            </button>
           </div>
         )}
       </div>

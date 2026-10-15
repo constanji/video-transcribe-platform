@@ -82,6 +82,14 @@ export default function TranscriptStudio({
   const [activeTemplateId, setActiveTemplateId] = useState(templateId);
   const [fileInfo, setFileInfo] = useState<FilesInfo | null>(null);
   const [filesLoading, setFilesLoading] = useState(false);
+  const pollErrorShown = useRef(false);
+  const [editingTranscript, setEditingTranscript] = useState(false);
+  const [draftTurns, setDraftTurns] = useState<Transcript['segments']>([]);
+  const [editingSummary, setEditingSummary] = useState(false);
+  const [summaryDraft, setSummaryDraft] = useState('');
+  const [selectedSummaryId, setSelectedSummaryId] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [mobilePane, setMobilePane] = useState<'transcript' | 'summary'>('transcript');
 
   async function load() {
     const next = await api<VideoAsset>(`/api/videos/${videoId}`);
@@ -141,20 +149,25 @@ export default function TranscriptStudio({
     const timer = window.setInterval(async () => {
       try {
         const next = await api<Job>(`/api/jobs/${job.id}`);
+        pollErrorShown.current = false;
         setJob(next);
         onJobChange?.(next);
         if (['completed', 'failed', 'cancelled'].includes(next.status)) {
           await load();
         }
-      } catch {
-        window.clearInterval(timer);
+      } catch (err) {
+        // 临时断网不应永久停止轮询；网络恢复后继续接管任务状态。
+        if (!pollErrorShown.current) {
+          pollErrorShown.current = true;
+          onToast(`任务状态暂时无法刷新：${(err as Error).message}`, 'error');
+        }
       }
     }, 1000);
     return () => window.clearInterval(timer);
   }, [job?.id, job?.status]);
 
   const transcript: Transcript | undefined = video?.transcripts?.[0];
-  const summary: Summary | undefined = video?.summaries?.[0];
+  const summary: Summary | undefined = video?.summaries?.find((item) => item.id === selectedSummaryId) || video?.summaries?.[0];
   const summaryText = cleanSummaryMarkdown(summary?.content_markdown);
   const summaryHtml = useMemo(() => renderMarkdown(summaryText), [summaryText]);
   // 导出文件名用视频标题，去掉文件系统不允许的字符。
@@ -166,6 +179,73 @@ export default function TranscriptStudio({
     if (!transcript?.text) return [];
     return transcript.text.split('\n').filter(Boolean).map((text) => ({ text }));
   }, [transcript]);
+
+  useEffect(() => {
+    const summaries = video?.summaries || [];
+    if (!summaries.length) {
+      setSelectedSummaryId('');
+      return;
+    }
+    setSelectedSummaryId((current) => summaries.some((item) => item.id === current) ? current : summaries[0].id);
+  }, [video?.summaries]);
+
+  function beginTranscriptEdit() {
+    setDraftTurns(turns.map((item) => ({ ...item })));
+    setEditingTranscript(true);
+  }
+
+  function renameDraftSpeaker(oldName: string | null | undefined, nextName: string) {
+    setDraftTurns((current) => current.map((item) => (
+      (item.speaker || '') === (oldName || '') ? { ...item, speaker: nextName } : item
+    )));
+  }
+
+  async function saveTranscriptEdit() {
+    if (!transcript || savingEdit) return;
+    const segments = draftTurns.map((item) => ({ ...item, text: (item.text || '').trim() }));
+    const text = segments.map((item) => item.text || '').filter(Boolean).join('\n');
+    if (!text) {
+      onToast('转录内容不能为空', 'error');
+      return;
+    }
+    setSavingEdit(true);
+    try {
+      await api(`/api/transcripts/${transcript.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ text, segments }),
+      });
+      await load();
+      setEditingTranscript(false);
+      onToast('校对结果已保存为新版本');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
+  function beginSummaryEdit() {
+    setSummaryDraft(summaryText);
+    setEditingSummary(true);
+  }
+
+  async function saveSummaryEdit() {
+    if (!summary || !summaryDraft.trim() || savingEdit) return;
+    setSavingEdit(true);
+    try {
+      await api(`/api/summaries/${summary.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ content_markdown: summaryDraft }),
+      });
+      await load();
+      setEditingSummary(false);
+      onToast('纪要修改已保存为新版本');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setSavingEdit(false);
+    }
+  }
 
   async function copyTranscript(withSpeaker = false) {
     if (!transcript?.text) return;
@@ -332,13 +412,19 @@ export default function TranscriptStudio({
   // 会议场景专属：录音文件已落盘（meeting.audio_path），失败/中断后不必重录，
   // 直接重跑终稿转录。job 挂上去后由上方现有轮询接管，完成后自动 load() 刷新转录。
   async function retryTranscribe() {
-    if (!meetingId || retrying) return;
+    if (retrying || (!meetingId && !job?.id)) return;
     setRetrying(true);
     try {
-      const payload = await api<{ job?: Job }>(`/api/v1/meetings/${meetingId}/retry-transcribe`, { method: 'POST' });
-      if (payload.job) {
-        setJob(payload.job);
-        onJobChange?.(payload.job);
+      if (meetingId) {
+        const payload = await api<{ job?: Job }>(`/api/v1/meetings/${meetingId}/retry-transcribe`, { method: 'POST' });
+        if (payload.job) {
+          setJob(payload.job);
+          onJobChange?.(payload.job);
+        }
+      } else if (job?.id) {
+        const created = await api<Job>(`/api/jobs/${job.id}/retry`, { method: 'POST' });
+        setJob(created);
+        onJobChange?.(created);
       }
       onToast('已重新开始终稿转录');
     } catch (err) {
@@ -380,8 +466,12 @@ export default function TranscriptStudio({
             <button type="button" className="studio-close" onClick={onClose} aria-label="关闭">×</button>
           </div>
         </header>
+        <div className="studio-mobile-tabs" role="tablist" aria-label="结果类型">
+          <button type="button" className={mobilePane === 'transcript' ? 'active' : ''} onClick={() => setMobilePane('transcript')}>转录</button>
+          <button type="button" className={mobilePane === 'summary' ? 'active' : ''} onClick={() => setMobilePane('summary')}>纪要</button>
+        </div>
         <div className="studio-body">
-          <section className="studio-pane">
+          <section className={`studio-pane${mobilePane !== 'transcript' ? ' mobile-pane-hidden' : ''}`}>
             <div className="studio-pane-toolbar">
               <div className="copy-split">
                 <button type="button" onClick={() => copyTranscript(false)} disabled={!transcript}>
@@ -396,6 +486,16 @@ export default function TranscriptStudio({
                   </div>
                 </details>
               </div>
+              {transcript && !editingTranscript ? (
+                <button type="button" className="studio-tool" onClick={beginTranscriptEdit}>校对转录</button>
+              ) : editingTranscript ? (
+                <>
+                  <button type="button" className="studio-tool active" disabled={savingEdit} onClick={saveTranscriptEdit}>
+                    {savingEdit ? '保存中…' : '保存校对版'}
+                  </button>
+                  <button type="button" className="studio-tool" disabled={savingEdit} onClick={() => setEditingTranscript(false)}>取消</button>
+                </>
+              ) : null}
               {/* 会议录音已落盘，转录失败/中断后可在这里直接重跑，不必回工作台重录。 */}
               {meetingId && (
                 <button
@@ -422,19 +522,64 @@ export default function TranscriptStudio({
             ) : !transcript ? (
               <p className="studio-empty-text">还没有转录结果。</p>
             ) : null}
-            {turns.map((item, index) => (
+            {(editingTranscript ? draftTurns : turns).map((item, index) => (
               <article className="studio-turn" key={`${item.text}-${index}`}>
                 <time>[{clock(segmentStart(item))}]</time>
                 <div>
-                  {item.speaker && <em>{item.speaker}</em>}
-                  <p>{item.text}</p>
+                  {editingTranscript ? (
+                    <>
+                      <input
+                        className="studio-speaker-input"
+                        value={item.speaker || ''}
+                        aria-label={`第 ${index + 1} 段说话人`}
+                        placeholder="说话人"
+                        onChange={(event) => renameDraftSpeaker(item.speaker, event.target.value)}
+                      />
+                      <textarea
+                        className="studio-transcript-editor"
+                        value={item.text || ''}
+                        aria-label={`第 ${index + 1} 段转录内容`}
+                        onChange={(event) => setDraftTurns((current) => current.map((turn, turnIndex) => (
+                          turnIndex === index ? { ...turn, text: event.target.value } : turn
+                        )))}
+                      />
+                    </>
+                  ) : (
+                    <>
+                      {item.speaker && <em>{item.speaker}</em>}
+                      <p>{item.text}</p>
+                    </>
+                  )}
                 </div>
               </article>
             ))}
           </div>
           </section>
-          <section className="studio-pane">
+          <section className={`studio-pane${mobilePane !== 'summary' ? ' mobile-pane-hidden' : ''}`}>
             <div className="studio-pane-toolbar studio-summary-toolbar">
+              {(video?.summaries?.length || 0) > 1 && (
+                <select
+                  aria-label="纪要版本"
+                  value={summary?.id || ''}
+                  onChange={(event) => setSelectedSummaryId(event.target.value)}
+                >
+                  {(video?.summaries || []).map((item, index) => (
+                    <option key={item.id} value={item.id}>
+                      版本 {(video?.summaries?.length || 0) - index} · {new Date(item.created_at).toLocaleString('zh-CN')}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {summaryText && !editingSummary ? (
+                <button type="button" className="studio-tool" onClick={beginSummaryEdit}>编辑纪要</button>
+              ) : editingSummary ? (
+                <>
+                  <button type="button" className="studio-tool active" disabled={savingEdit} onClick={saveSummaryEdit}>
+                    {savingEdit ? '保存中…' : '保存新版本'}
+                  </button>
+                  <button type="button" className="studio-tool" disabled={savingEdit} onClick={() => setEditingSummary(false)}>取消</button>
+                </>
+              ) : null}
               <button
                 type="button"
                 className={modelReady ? 'studio-tool active' : 'studio-tool muted-button'}
@@ -445,14 +590,6 @@ export default function TranscriptStudio({
                 <Icon d="M12 2l1.6 4.4L18 8l-4.4 1.6L12 14l-1.6-4.4L6 8l4.4-1.6L12 2zm7 9l.9 2.6L23 15l-3.1.9L19 19l-.9-3.1L15 15l3.1-.9L19 11zM5 14l.8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8L5 14z" />
                 {generating ? '生成中…' : summaryText ? '重新生成摘要' : '生成摘要'}
               </button>
-              <StudioSelect
-                icon="M12.9 15h-1.8L9.6 11.4 8 15H6.2l2.8-7h1.6l2.3 7zM4 4h16v2H4V4zm2 14h12v2H6v-2z"
-                value="zh-CN"
-                ariaLabel="摘要语言"
-                title="摘要语言"
-                options={[{ value: 'zh-CN', label: '简体中文' }]}
-                onChange={() => undefined}
-              />
               <StudioSelect
                 icon="M12 2a4 4 0 014 4v1h1a3 3 0 013 3v2h-2v5a3 3 0 01-3 3H9a3 3 0 01-3-3v-5H4V10a3 3 0 013-3h1V6a4 4 0 014-4zm-1 14v3h2v-3h-2zm0-8v6h2V8h-2z"
                 value={provider}
@@ -505,11 +642,20 @@ export default function TranscriptStudio({
                 </button>
               </div>
             ) : summaryText ? (
-            <article
-              className="studio-summary markdown-body rich-text"
-              // renderMarkdown 输出前已整体做 HTML 转义，这里不会有注入面。
-              dangerouslySetInnerHTML={{ __html: summaryHtml }}
-            />
+            editingSummary ? (
+              <textarea
+                className="studio-summary-editor"
+                value={summaryDraft}
+                aria-label="编辑会议纪要 Markdown"
+                onChange={(event) => setSummaryDraft(event.target.value)}
+              />
+            ) : (
+              <article
+                className="studio-summary markdown-body rich-text"
+                // renderMarkdown 输出前已整体做 HTML 转义，这里不会有注入面。
+                dangerouslySetInnerHTML={{ __html: summaryHtml }}
+              />
+            )
           ) : summary ? (
             <div className="studio-empty">
               <span className="studio-empty-icon">?</span>

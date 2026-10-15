@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import type { Job, Template, VideoAsset } from '../lib/types';
 import TemplateEditor from './TemplateEditor';
@@ -17,6 +17,7 @@ function hasUsableSummary(item: VideoAsset) {
 
 export default function SummaryAction({
   videoId,
+  meetingId,
   resetKey,
   initialJob = null,
   hasTranscript = false,
@@ -32,6 +33,7 @@ export default function SummaryAction({
   onResultState,
 }: {
   videoId: string;
+  meetingId?: string;
   resetKey?: string;
   initialJob?: Job | null;
   hasTranscript?: boolean;
@@ -57,6 +59,7 @@ export default function SummaryAction({
   const [summaryDone, setSummaryDone] = useState(hasSummary);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [moss, setMoss] = useState<{ loaded?: boolean; loading?: boolean; reachable?: boolean }>({});
+  const pollErrorShown = useRef(false);
 
   // 内置本地模型由 MOSS 用 llama-cli 加载 summary_model_path 指向的 GGUF 做总结，
   // 所以本机有没有那个文件直接决定本地总结是否可用；远程 provider 必须配 api_base_url。
@@ -119,14 +122,18 @@ export default function SummaryAction({
     const timer = window.setInterval(async () => {
       try {
         const next = await api<Job>(`/api/jobs/${job.id}`);
+        pollErrorShown.current = false;
         setJob(next);
         if (['completed', 'failed'].includes(next.status)) {
           const video = await api<VideoAsset>(`/api/videos/${videoId}`);
           setTranscriptReady(hasUsableTranscript(video));
           setSummaryDone(Boolean(hasUsableSummary(video) || (next.job_type === 'summarize' && next.status === 'completed' && (video.summaries || []).some((value) => (value.content_markdown || '').trim()))));
         }
-      } catch {
-        window.clearInterval(timer);
+      } catch (err) {
+        if (!pollErrorShown.current) {
+          pollErrorShown.current = true;
+          onToast(`任务状态暂时无法刷新：${(err as Error).message}`, 'error');
+        }
       }
     }, 1000);
     return () => window.clearInterval(timer);
@@ -163,7 +170,12 @@ export default function SummaryAction({
       const path = kind === 'transcribe' ? `/api/videos/${videoId}/transcribe` : `/api/videos/${videoId}/summary`;
       const created = await api<Job>(path, {
         method: 'POST',
-        body: JSON.stringify({ video_id: videoId, template_id: templateId, reuse_transcript: true }),
+        body: JSON.stringify({
+          video_id: videoId,
+          template_id: templateId,
+          reuse_transcript: true,
+          transcription: { language: settings.default_language || 'zh' },
+        }),
       });
       setJob(created);
       onToast(kind === 'transcribe' ? '转录已开始，进度见右侧日志' : '正在按模板转录并总结');
@@ -248,6 +260,7 @@ export default function SummaryAction({
       {studio && (
         <TranscriptStudio
           videoId={videoId}
+          meetingId={meetingId}
           templateId={templateId}
           templateName={templates.find((item) => item.id === templateId)?.name}
           templates={templates}

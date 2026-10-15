@@ -7,7 +7,8 @@ export type CaptureHandlers = {
 };
 
 const TARGET_RATE = 16000;
-const MIN_SPEECH_MS = 800;
+// 中文确认词、人名等常短于 800ms；降低阈值避免“是/同意/小王”被 VAD 丢弃。
+const MIN_SPEECH_MS = 400;
 // 单块上限：MOSS 在 CPU 上的单块耗时 ≈ 5.8s 固定开销 + 0.51s/音频秒（Whisper 30s 窗 padding 造成）。
 // 8s 块恒为 RTF 1.24（追不上说话速度，必然堆积）；16s 块 RTF≈0.87，留 12.8% 余量且仍在单个 30s 窗内。
 const MAX_SPEECH_MS = 16000;
@@ -113,8 +114,15 @@ export class MeetingCapture {
     const destination = this.context.createMediaStreamDestination();
     const mix = this.context.createGain();
     mix.connect(destination);
-    if (this.micStream) this.context.createMediaStreamSource(this.micStream).connect(mix);
-    if (this.systemStream) this.context.createMediaStreamSource(this.systemStream).connect(mix);
+    const connectSource = (stream: MediaStream, gainValue: number) => {
+      const gain = this.context!.createGain();
+      gain.gain.value = gainValue;
+      this.context!.createMediaStreamSource(stream).connect(gain).connect(mix);
+    };
+    // 双音源简单相加容易削波；各留约 3dB 余量，终稿识别会更稳定。
+    const sourceGain = this.source === 'both' ? 0.7 : 1;
+    if (this.micStream) connectSource(this.micStream, sourceGain);
+    if (this.systemStream) connectSource(this.systemStream, sourceGain);
     this.node = new AudioWorkletNode(this.context, 'pcm-capture');
     const silent = this.context.createGain();
     silent.gain.value = 0;

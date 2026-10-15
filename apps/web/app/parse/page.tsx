@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import LinkParserCard from '../../components/LinkParserCard';
 import ParsedVideoCard from '../../components/ParsedVideoCard';
 import PlatformLogoStrip from '../../components/PlatformLogoStrip';
@@ -10,6 +10,21 @@ import TopBar from '../../components/TopBar';
 import { api } from '../../lib/api';
 import { readWorkbenchDraft, writeWorkbenchDraft } from '../../lib/workbench-draft';
 import type { MediaVariant, Platform, VideoAsset } from '../../lib/types';
+
+const COOKIE_TARGETS = [
+  { id: 'shipinhao', keys: ['腾讯元宝', '视频号短链'], name: '微信视频号', site: 'https://yuanbao.tencent.com', host: 'yuanbao.tencent.com' },
+  { id: 'pixiv', keys: ['Pixiv'], name: 'Pixiv', site: 'https://www.pixiv.net/', host: 'www.pixiv.net' },
+  { id: 'xhs', keys: ['小红书'], name: '小红书', site: 'https://www.xiaohongshu.com/', host: 'www.xiaohongshu.com' },
+  { id: 'youtube', keys: ['YouTube'], name: 'YouTube', site: 'https://www.youtube.com/', host: 'www.youtube.com' },
+  { id: 'qzone', keys: ['QQ 空间', 'QQ空间'], name: 'QQ空间', site: 'https://user.qzone.qq.com/', host: 'qzone.qq.com' },
+  { id: 'xiaoheihe', keys: ['小黑盒'], name: '小黑盒', site: 'https://www.xiaoheihe.cn/', host: 'www.xiaoheihe.cn' },
+  { id: 'tiktok', keys: ['TikTok'], name: 'TikTok', site: 'https://www.tiktok.com/', host: 'www.tiktok.com' },
+];
+
+function matchCookieTarget(message: string) {
+  if (!message.includes('Cookie')) return null;
+  return COOKIE_TARGETS.find((item) => item.keys.some((key) => message.includes(key))) || null;
+}
 
 export default function ParsePage() {
   const [url, setUrl] = useState('');
@@ -24,7 +39,9 @@ export default function ParsePage() {
   const [cookie, setCookie] = useState('');
   const [cookieGuideOpen, setCookieGuideOpen] = useState(false);
   const [cookieSaving, setCookieSaving] = useState(false);
-  const needsShipinhaoCookie = error.includes('腾讯元宝 Cookie') || error.includes('视频号短链需要配置');
+  const parseController = useRef<AbortController | null>(null);
+  const parseRunning = useRef(false);
+  const cookieTarget = matchCookieTarget(error);
 
   async function loadRecent() {
     setRecent(await api<VideoAsset[]>('/api/videos/recent').catch(() => []));
@@ -50,7 +67,17 @@ export default function ParsePage() {
     if (draft.videoId) {
       void restoreVideo(draft.videoId, draft.panel);
     }
+    return () => parseController.current?.abort();
   }, []);
+
+  useEffect(() => {
+    if (!cookieGuideOpen) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setCookieGuideOpen(false);
+    };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [cookieGuideOpen]);
 
   function changeUrl(value: string) {
     setUrl(value);
@@ -58,31 +85,50 @@ export default function ParsePage() {
   }
 
   async function parse(target = url) {
-    if (!target.trim()) return;
+    if (parseRunning.current) return;
+    const matched = target.trim().match(/https?:\/\/[^\s<>"'，。、]+/i);
+    if (!matched) {
+      setError('请输入包含 http:// 或 https:// 的有效视频链接');
+      return;
+    }
+    const normalizedTarget = matched[0].replace(/[).,，。/\]]+$/, '');
+    const controller = new AbortController();
+    parseController.current = controller;
+    parseRunning.current = true;
     setLoading(true);
     setError('');
     try {
       const parsed = await api<VideoAsset>('/api/parse', {
         method: 'POST',
-        body: JSON.stringify({ url: target.trim() }),
+        signal: controller.signal,
+        body: JSON.stringify({ url: normalizedTarget }),
       });
       setVideo(parsed);
       setVariants(parsed.variants || await api<MediaVariant[]>(`/api/videos/${parsed.id}/variants`));
-      writeWorkbenchDraft({ url: target.trim(), videoId: parsed.id });
+      writeWorkbenchDraft({ url: normalizedTarget, videoId: parsed.id });
       await loadRecent();
     } catch (err) {
-      const message = (err as Error).message;
-      setError(message);
-      if (message.includes('腾讯元宝 Cookie') || message.includes('视频号短链需要配置')) {
-        setCookieGuideOpen(true);
+      if (controller.signal.aborted) {
+        setError('已取消本次解析');
+        return;
       }
+      const raw = (err as Error).message;
+      const message = raw === 'Failed to fetch' ? '无法连接解析服务，请确认本机 API 正在运行后重试' : raw;
+      setError(message);
+      if (matchCookieTarget(message)) setCookieGuideOpen(true);
     } finally {
+      if (parseController.current === controller) parseController.current = null;
+      parseRunning.current = false;
       setLoading(false);
     }
   }
 
+  function cancelParse() {
+    parseController.current?.abort();
+  }
+
   async function saveCookieAndRetry() {
-    if (!cookie.trim()) return;
+    if (!cookie.trim() || !cookieTarget) return;
     setCookieSaving(true);
     try {
       const current = await api<any>('/api/settings/parser');
@@ -90,10 +136,11 @@ export default function ParsePage() {
         method: 'PUT',
         body: JSON.stringify({
           ...current,
-          parsers: { ...(current.parsers || {}), shipinhao: { ...(current.parsers?.shipinhao || {}), cookies: cookie.trim() } },
+          parsers: { ...(current.parsers || {}), [cookieTarget?.id || '']: { ...(current.parsers?.[cookieTarget?.id || ''] || {}), cookies: cookie.trim() } },
         }),
       });
       setCookieGuideOpen(false);
+      setCookie('');
       await parse(url);
     } catch (err) {
       setError((err as Error).message);
@@ -144,40 +191,41 @@ export default function ParsePage() {
         <h1>解析视频，提炼内容。</h1>
         <p>从一个链接开始，查看媒体信息后选择下载、转录或总结。</p>
       </section>
-      <LinkParserCard url={url} loading={loading} onUrlChange={changeUrl} onParse={() => parse()}>
+      <LinkParserCard url={url} loading={loading} onUrlChange={changeUrl} onParse={() => parse()} onCancel={cancelParse}>
         <PlatformLogoStrip platforms={platforms} />
       </LinkParserCard>
       {error && (
         <div className="alert error parser-alert">
-          <div className="parser-alert-copy"><strong>{error}</strong>{needsShipinhaoCookie && <small>按下方步骤获取 Cookie，粘贴后即可继续解析当前链接。</small>}</div>
-          {needsShipinhaoCookie && (
-            <div className="cookie-inline-form">
-              <input value={cookie} onChange={(event) => setCookie(event.target.value)} placeholder="粘贴腾讯元宝 Cookie" aria-label="腾讯元宝 Cookie" />
-              <button type="button" className="outline-button" onClick={saveCookieAndRetry} disabled={cookieSaving || !cookie.trim()}>{cookieSaving ? '保存中…' : '保存并重试'}</button>
-              <a href="https://yuanbao.tencent.com" target="_blank" rel="noreferrer">打开腾讯元宝 ↗</a>
-            </div>
-          )}
-          <button type="button" onClick={() => setError('')}>×</button>
+          <div className="parser-alert-copy">
+            <strong>{error}</strong>
+            {cookieTarget && <small>需要登录态。本页和控制台都读不到对方的 Cookie，请按弹窗从请求头复制。</small>}
+          </div>
+          {cookieTarget && <button type="button" className="outline-button" onClick={() => setCookieGuideOpen(true)}>查看获取步骤</button>}
+          <button type="button" onClick={() => setError('')} aria-label="关闭错误提示">×</button>
         </div>
       )}
-      {cookieGuideOpen && (
-        <div className="cookie-guide-mask" role="dialog" aria-modal="true" aria-labelledby="cookie-guide-title">
-          <section className="cookie-guide">
+      {cookieGuideOpen && cookieTarget && (
+        <div className="cookie-guide-mask" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setCookieGuideOpen(false);
+        }}>
+          <section className="cookie-guide" role="dialog" aria-modal="true" aria-labelledby="cookie-guide-title">
             <button type="button" className="cookie-guide-close" onClick={() => setCookieGuideOpen(false)} aria-label="关闭引导">×</button>
-            <span className="eyebrow">首次配置</span>
-            <h2 id="cookie-guide-title">获取腾讯元宝 Cookie</h2>
-            <p>视频号短链需要借助腾讯元宝获取临时视频地址，只需首次配置一次。当前浏览器无法让本页面直接读取元宝的跨域 Cookie，因此需要你从请求标头复制一次。</p>
+            <span className="eyebrow">需要登录态</span>
+            <h2 id="cookie-guide-title">获取{cookieTarget.name} Cookie</h2>
+            <p>这个页面拿不到 {cookieTarget.name} 的登录状态。登录票据通常是 HttpOnly，在对方页面的控制台执行 document.cookie 也读不到。不安装浏览器扩展的话，只能从开发者工具的请求头里复制一次。</p>
             <ol>
-              <li>点击下方“打开腾讯元宝”，登录并打开任意对话页，保持该标签页不要关闭。</li>
-              <li>按 <kbd>F12</kbd>（Mac：<kbd>⌥⌘I</kbd>）打开开发者工具，切到 <strong>Network / 网络</strong>，勾选 <strong>Preserve log / 保留日志</strong>。</li>
-              <li>刷新元宝页面，或发送一条消息，让请求列表重新出现。</li>
-              <li>点开任意发往 <code>yuanbao.tencent.com</code> 的请求，在右侧找到 <strong>Headers / 标头</strong> → <strong>Request Headers / 请求标头</strong> → <strong>Cookie</strong>。</li>
-              <li>只复制 <code>Cookie:</code> 后面的整行内容，不要复制 <code>Cookie:</code> 这个字段名，也不要复制 Response Headers。</li>
-              <li>回到这里粘贴到输入框，点击“保存并重试”。Cookie 仅保存到当前服务端配置，不会显示原文。</li>
+              <li>点击下方打开 {cookieTarget.name}，确认已经登录。</li>
+              <li>按 <kbd>F12</kbd> 打开开发者工具，切到 <strong>Network / 网络</strong>，勾选 <strong>Preserve log / 保留日志</strong>。</li>
+              <li>刷新那个页面，点开任意发往 <code>{cookieTarget.host}</code> 的请求。</li>
+              <li>在 <strong>Request Headers / 请求标头</strong> 里找到 <strong>Cookie</strong>，只复制冒号后面的内容。</li>
+              <li>粘贴到下面并保存。Cookie 只写进本机解析器设置，不会回显原文。</li>
             </ol>
-            <div className="cookie-guide-note">找不到 Cookie 时：右键请求 → Copy → Copy as cURL，然后从命令中的 <code>--cookie</code> 或 <code>-H 'cookie: ...'</code> 复制值。</div>
-            <div className="cookie-guide-field"><input value={cookie} onChange={(event) => setCookie(event.target.value)} placeholder="粘贴 Cookie" aria-label="腾讯元宝 Cookie" /><button type="button" className="primary-button" onClick={saveCookieAndRetry} disabled={cookieSaving || !cookie.trim()}>{cookieSaving ? '保存中…' : '保存并重试'}</button></div>
-            <a className="cookie-guide-link" href="https://yuanbao.tencent.com" target="_blank" rel="noreferrer">打开腾讯元宝 ↗</a>
+            <div className="cookie-guide-note">找不到 Cookie 时：右键请求 → Copy → Copy as cURL，再从 <code>--cookie</code> 或 <code>-H &apos;cookie: ...&apos;</code> 里取出值。</div>
+            <div className="cookie-guide-field">
+              <input autoFocus value={cookie} onChange={(event) => setCookie(event.target.value)} placeholder="粘贴 Cookie" aria-label={`${cookieTarget.name} Cookie`} />
+              <button type="button" className="primary-button" onClick={saveCookieAndRetry} disabled={cookieSaving || !cookie.trim()}>{cookieSaving ? '保存中…' : '保存并重试'}</button>
+            </div>
+            <a className="cookie-guide-link" href={cookieTarget.site} target="_blank" rel="noreferrer">打开{cookieTarget.name} ↗</a>
           </section>
         </div>
       )}
@@ -189,9 +237,11 @@ export default function ParsePage() {
           video={video || { id: '', source_url: url, title: '', parse_status: 'parsing', created_at: '' }}
           platforms={platforms}
           variants={variants}
-          loading={loading && !video}
+          loading={loading}
           initialPanel={actionPanel}
-          onReparse={() => parse(video?.source_url || url)}
+          onReparse={() => {
+            if (!loading) void parse(video?.source_url || url);
+          }}
           onToast={(message, kind) => setToast({ message, kind })}
           onPanelChange={(panel) => {
             setActionPanel(panel);

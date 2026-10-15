@@ -184,7 +184,8 @@ def meeting_dict(session: Session, meeting) -> dict[str, Any]:
         ).first()
     live_segments = list(meeting.live_segments_json or [])
     transcript_payload = None
-    if transcript and transcript.text.strip() and meeting.status in {"ready", "summarizing"}:
+    # 旧终稿在重新转录、纪要失败或取消时仍然可用，不应随会议状态被隐藏。
+    if transcript and transcript.text.strip():
         transcript_payload = {
             "id": transcript.id,
             "model": transcript.model,
@@ -233,9 +234,11 @@ def require_moss_ready() -> dict[str, Any]:
 
 
 def start_final_transcribe(session: Session, meeting) -> Any:
-    from .main import _create_media_job, execute_transcribe_job
+    from .main import _create_media_job, _has_active_job
 
     video = ensure_meeting_video(session, meeting)
+    if _has_active_job(session, video.id, "transcribe"):
+        raise HTTPException(409, "终稿转录正在进行中")
     job = _create_media_job(session, video, "transcribe", "会议终稿转录已创建")
     meeting.status = "processing"
     meeting.error_message = None
@@ -300,18 +303,21 @@ def finalize_live_meeting(session: Session, meeting) -> None:
 
 
 def start_summary(session: Session, meeting, template_id: str | None) -> Any:
-    from .main import _create_media_job, _latest_transcript, _summary_ready, current_transcription, execute_summary_job
+    from .main import _create_media_job, _has_active_job, _latest_transcript, _summary_ready, current_transcription, execute_summary_job
 
     settings = current_transcription()
     if not _summary_ready(settings):
         raise HTTPException(400, "总结模型未配置")
-    if meeting.status not in {"ready", "summarizing"}:
+    if meeting.status != "ready":
         raise HTTPException(409, "请等待终稿转录完成后再总结")
     if not meeting.video_asset_id or not _latest_transcript(session, meeting.video_asset_id):
         raise HTTPException(409, "还没有转录结果，请先完成转录")
     video = ensure_meeting_video(session, meeting)
+    if _has_active_job(session, video.id, "summarize"):
+        raise HTTPException(409, "会议纪要正在生成中")
     job = _create_media_job(session, video, "summarize", "根据会议转录生成纪要")
     meeting.status = "summarizing"
+    meeting.error_message = None
     meeting.updated_at = _now()
     session.commit()
 
@@ -330,8 +336,12 @@ def start_summary(session: Session, meeting, template_id: str | None) -> Any:
                 current.status = "ready"
                 current.error_message = None
             elif stored.status == "failed":
-                current.status = "failed"
+                # 纪要失败不影响已经完成的终稿，保留 ready 才能直接重试总结。
+                current.status = "ready"
                 current.error_message = stored.error_message
+            elif stored.status == "cancelled":
+                current.status = "ready"
+                current.error_message = "纪要生成已取消"
             current.updated_at = _now()
             session_inner.commit()
 
@@ -586,19 +596,27 @@ async def upload_meeting_audio(
     folder = MEETING_DIR / meeting.id
     folder.mkdir(parents=True, exist_ok=True)
     dest = folder / f"audio{extension}"
+    temp_dest = folder / f".upload-{secrets.token_hex(6)}.part"
     size = 0
     try:
-        with dest.open("wb") as target:
+        with temp_dest.open("wb") as target:
             while chunk := await file.read(1024 * 1024):
                 size += len(chunk)
                 if size > 500 * 1024 * 1024:
                     raise HTTPException(413, "单个文件不能超过 500MB")
                 target.write(chunk)
+    except Exception:
+        temp_dest.unlink(missing_ok=True)
+        raise
     finally:
         await file.close()
     if size == 0:
-        dest.unlink(missing_ok=True)
+        temp_dest.unlink(missing_ok=True)
         raise HTTPException(400, "不能上传空文件")
+    previous_path = Path(meeting.audio_path) if meeting.audio_path else None
+    os.replace(temp_dest, dest)
+    if previous_path and previous_path != dest:
+        previous_path.unlink(missing_ok=True)
     duration = _uploaded_media_info(dest, media_type)
     video = ensure_meeting_video(session, meeting)
     video.title = meeting.title
@@ -820,10 +838,17 @@ async def live_meeting(websocket: WebSocket, meeting_id: str, api_key: str | Non
             return
         batch, pending = pending, []
         last_flush = time.time()
-        try:
-            await asyncio.to_thread(append_live_segments, meeting_id, batch)
-        except Exception:
-            pass
+        error: Exception | None = None
+        for attempt in range(3):
+            try:
+                await asyncio.to_thread(append_live_segments, meeting_id, batch)
+                return
+            except Exception as exc:
+                error = exc
+                await asyncio.sleep(0.2 * (attempt + 1))
+        # 不确认未落库的片段：恢复 pending 并断开，让客户端用同一 seq 重连重发。
+        pending = batch + pending
+        raise RuntimeError(f"实时转写片段保存失败：{error}")
 
     try:
         while True:

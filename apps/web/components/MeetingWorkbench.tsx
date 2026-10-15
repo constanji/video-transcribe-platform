@@ -3,15 +3,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { MeetingCapture, pcm16ToBase64, type AudioSource } from '../lib/meeting-capture';
-import { cancelJob, createMeeting, getMeeting, meetingWsUrl, retryTranscribe, uploadMeetingAudio } from '../lib/meeting-api';
+import { cancelJob, createMeeting, deleteMeeting, getMeeting, meetingWsUrl, retryTranscribe, uploadMeetingAudio } from '../lib/meeting-api';
 import type { Job, MeetingRecord, MeetingSegment, Platform, VideoAsset } from '../lib/types';
 import ParsedVideoCard from './ParsedVideoCard';
 import SummaryProgress from './SummaryProgress';
 
 type Mode = 'live' | 'recording';
-type Phase = 'idle' | 'starting' | 'recording' | 'paused' | 'stopping' | 'processing' | 'ready';
+type Phase = 'idle' | 'starting' | 'recording' | 'paused' | 'uploading' | 'stopping' | 'processing' | 'ready';
 
 const ACCEPT = '.mp3,.wav,.m4a,.mp4,.webm,.mov';
+const MAX_FILE_BYTES = 500 * 1024 * 1024;
 
 // 单块确认超时 / 重试上限：没有它，任一帧丢失都会永久卡住整条有序队列。
 const MAX_ATTEMPTS = 5;
@@ -77,6 +78,7 @@ export default function MeetingWorkbench({
   const [failure, setFailure] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const captureRef = useRef<MeetingCapture | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const seqRef = useRef(0);
@@ -85,6 +87,8 @@ export default function MeetingWorkbench({
   const ackedEndRef = useRef(0);
   const finishingRef = useRef(false);
   const reconnectRef = useRef(0);
+  const liveDegradedRef = useRef(false);
+  const uploadAbortRef = useRef<AbortController | null>(null);
   const phaseRef = useRef<Phase>('idle');
   const meetingIdRef = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -231,6 +235,9 @@ export default function MeetingWorkbench({
     ackedEndRef.current = 0;
     finishingRef.current = false;
     reconnectRef.current = 0;
+    liveDegradedRef.current = false;
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = null;
     setBusyHint('');
     setFailure(null);
     setLagSec(0);
@@ -240,6 +247,7 @@ export default function MeetingWorkbench({
     setMeeting(null);
     setVideo(null);
     setJob(null);
+    setUploadProgress(null);
     setPhase('idle');
   }
 
@@ -314,23 +322,18 @@ export default function MeetingWorkbench({
     sendChunk(next, 0);
   }
 
-  // 队列超限时合并最旧两块；用静音补齐间隔，保持绝对时间轴不漂移。
-  function mergeFront() {
-    const queue = queueRef.current;
-    if (queue.length < 2) return;
-    const first = queue[0];
-    const second = queue[1];
-    const gapSamples = Math.max(0, Math.round(((second.offsetMs - first.endMs) / 1000) * 16000));
-    const merged = new Int16Array(first.pcm.length + gapSamples + second.pcm.length);
-    merged.set(first.pcm, 0);
-    merged.set(second.pcm, first.pcm.length + gapSamples);
-    queue.splice(0, 2, { ...first, pcm: merged, endMs: second.endMs, timer: null });
-  }
-
   function enqueue(pcm: Int16Array, offsetMs: number) {
+    if (queueRef.current.length >= MAX_QUEUE) {
+      // 不再把块无限合并成超长请求。完整录音仍由 MediaRecorder 保存，停止后终稿不会丢。
+      if (!liveDegradedRef.current) {
+        liveDegradedRef.current = true;
+        setBusyHint('实时字幕已跟不上，将以停录后的终稿为准');
+        onToast('实时字幕延迟过高，已暂停发送新字幕块；完整录音仍会保存', 'error');
+      }
+      return;
+    }
     const endMs = offsetMs + (pcm.length / 16000) * 1000;
     queueRef.current.push({ seq: 0, pcm, offsetMs, endMs, attempts: 0, holdCount: 0, sent: false, timer: null });
-    while (queueRef.current.length > MAX_QUEUE) mergeFront();
     pump();
   }
 
@@ -510,7 +513,9 @@ export default function MeetingWorkbench({
       socketRef.current = null;
       // ③ 先无条件落盘音频（transcribe=false，与转写解耦），保证「停止即保存」。
       //    即使 MOSS 忙/未就绪，录音文件也已持久化，可稍后用重试按钮重跑转写。
-      const saved = await uploadMeetingAudio(current.id, file, false);
+      setUploadProgress(0);
+      const saved = await uploadMeetingAudio(current.id, file, false, setUploadProgress);
+      setUploadProgress(null);
       setMeeting(saved);
       if (saved.video) setVideo(saved.video);
       // ④ 落盘成功后再单独启动终稿转录。
@@ -532,6 +537,7 @@ export default function MeetingWorkbench({
       setPhase('idle');
       onToast((err as Error).message, 'error');
     } finally {
+      setUploadProgress(null);
       finishingRef.current = false;
     }
   }
@@ -579,22 +585,39 @@ export default function MeetingWorkbench({
   }
 
   async function importFile(file: File) {
+    if (file.size > MAX_FILE_BYTES) {
+      onToast('单个文件不能超过 500MB', 'error');
+      return;
+    }
     if (!mossReady) {
       onToast(mossMessage, 'error');
       return;
     }
     setFailure(null);
     setPhase('starting');
+    let createdId: string | null = null;
     try {
       const created = await createMeeting({ mode: 'recording', language, audio_source: source, title: file.name.replace(/\.[^.]+$/, '') });
+      createdId = created.id;
       setMeeting(created);
+      setPhase('uploading');
+      setUploadProgress(0);
+      const controller = new AbortController();
+      uploadAbortRef.current = controller;
+      const next = await uploadMeetingAudio(created.id, file, true, setUploadProgress, controller.signal);
+      uploadAbortRef.current = null;
+      setUploadProgress(null);
       setPhase('processing');
-      const next = await uploadMeetingAudio(created.id, file, true);
       setMeeting(next);
       setJob(next.job || null);
       if (next.video) setVideo(next.video);
       onToast('文件已导入，正在转录');
     } catch (err) {
+      uploadAbortRef.current = null;
+      if ((err as Error).message === '上传已取消' && createdId) {
+        await deleteMeeting(createdId).catch(() => undefined);
+      }
+      setUploadProgress(null);
       setPhase('idle');
       onToast((err as Error).message, 'error');
     }
@@ -674,6 +697,12 @@ export default function MeetingWorkbench({
           ) : null}
           {phase === 'starting' ? <button type="button" className="primary-button" disabled>正在启动…</button> : null}
           {phase === 'stopping' ? <button type="button" className="primary-button" disabled>正在保存…</button> : null}
+          {phase === 'uploading' ? (
+            <>
+              <button type="button" className="primary-button" disabled>正在上传… {uploadProgress ?? 0}%</button>
+              <button type="button" className="outline-button" onClick={() => uploadAbortRef.current?.abort()}>取消上传</button>
+            </>
+          ) : null}
           {phase === 'processing' ? (
             <>
               <button type="button" className="outline-button" disabled>终稿转录中…</button>
@@ -686,6 +715,11 @@ export default function MeetingWorkbench({
           ) : null}
         </div>
         {!mossReady && <p className="inline-warning">{mossMessage}</p>}
+        {uploadProgress !== null && (
+          <div className="studio-progress" role="progressbar" aria-label="录音上传进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={uploadProgress}>
+            <i style={{ width: `${uploadProgress}%` }} />
+          </div>
+        )}
       </section>
 
       {mode === 'live' && (recording || segments.length > 0) && (
@@ -728,7 +762,16 @@ export default function MeetingWorkbench({
           </div>
           <div
             className="upload-dropzone"
+            role="button"
+            tabIndex={0}
+            aria-label="选择或拖入音频视频文件"
             onClick={() => fileRef.current?.click()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                fileRef.current?.click();
+              }
+            }}
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => {
               event.preventDefault();
@@ -777,6 +820,7 @@ export default function MeetingWorkbench({
         <ParsedVideoCard
           id="meeting-result"
           video={video}
+          meetingId={meeting?.id}
           platforms={platforms}
           variants={video.variants || []}
           loading={false}

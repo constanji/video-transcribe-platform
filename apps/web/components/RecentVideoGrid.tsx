@@ -1,8 +1,12 @@
 'use client';
 
-import { logoSrc } from '../lib/api';
+import { useEffect, useState } from 'react';
+import { api, logoSrc } from '../lib/api';
 import { withToken } from '../lib/auth';
+import { isImageRecord } from '../lib/media-kind';
 import type { Platform, VideoAsset } from '../lib/types';
+
+type MediaFilter = 'all' | 'video' | 'image';
 
 function timeLabel(value?: string | null) {
   if (!value) return '尚未处理';
@@ -24,22 +28,47 @@ export default function RecentVideoGrid({
   onOpen: (video: VideoAsset) => void;
   onDelete: (video: VideoAsset) => void;
 }) {
+  const [media, setMedia] = useState<MediaFilter>('all');
+  const [scoped, setScoped] = useState<{ media: MediaFilter; items: VideoAsset[] } | null>(null);
+
+  useEffect(() => {
+    if (media === 'all') return;
+    let active = true;
+    api<VideoAsset[]>(`/api/videos/recent?media=${media}`).then((data) => {
+      if (active) setScoped({ media, items: data });
+    }).catch(() => {
+      if (active) setScoped({ media, items: [] });
+    });
+    return () => { active = false; };
+  }, [media, videos]);
+
+  const shown = media === 'all' ? videos : scoped?.media === media ? scoped.items : null;
+  const historyHref = media === 'all' ? '/history' : `/history?media=${media}`;
+
   return (
     <section className="library-panel recent-panel">
       <div className="section-title">
         <h2>最近的解析</h2>
-        <a className="recent-all-link" href="/history">查看全部 <span aria-hidden="true">→</span></a>
+        <div className="media-switch" role="tablist" aria-label="解析记录类型">
+          {([['all', '全部'], ['video', '视频'], ['image', '图片']] as const).map(([id, label]) => (
+            <button type="button" key={id} className={media === id ? 'active' : ''} onClick={() => setMedia(id)}>{label}</button>
+          ))}
+        </div>
+        <a className="recent-all-link" href={historyHref}>查看全部 <span aria-hidden="true">→</span></a>
       </div>
-      {videos.length === 0 ? (
+      {shown === null ? (
+        <div className="empty-library"><strong>正在加载</strong></div>
+      ) : shown.length === 0 ? (
         <div className="empty-library">
           <span>▣</span>
-          <strong>还没有解析记录</strong>
+          <strong>{media === 'image' ? '还没有图片解析记录' : media === 'video' ? '还没有视频解析记录' : '还没有解析记录'}</strong>
           <p>粘贴链接并解析后，封面、标题和状态会显示在这里。</p>
         </div>
       ) : (
         <div className="recent-grid">
-          {videos.map((video) => {
+          {shown.map((video) => {
             const platform = platforms.find((item) => item.id === video.platform);
+            const imageOnly = isImageRecord(video);
             return (
               <article className="recent-card" key={video.id} role="button" tabIndex={0} onClick={() => onOpen(video)} onKeyDown={(event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
@@ -61,14 +90,22 @@ export default function RecentVideoGrid({
                 </p>
                 <p>{timeLabel(video.last_processed_at || video.created_at)}</p>
                 <p className="status-text">{video.parse_status === 'uploaded' ? '文件已就绪' : video.parse_status === 'parsed' ? '已解析' : '待接入解析器'}</p>
-                <p className="flags">
-                  <span className={video.has_transcript ? 'flag-on' : 'flag-off'}>{video.has_transcript ? '已有转录' : '无转录'}</span>
-                  <span className={video.has_summary ? 'flag-on' : 'flag-off'}>{video.has_summary ? '已有总结' : '无总结'}</span>
-                </p>
+                {!imageOnly && (
+                  <p className="flags">
+                    <span className={video.has_transcript ? 'flag-on' : 'flag-off'}>{video.has_transcript ? '已有转录' : '无转录'}</span>
+                    <span className={video.has_summary ? 'flag-on' : 'flag-off'}>{video.has_summary ? '已有总结' : '无总结'}</span>
+                  </p>
+                )}
                 <div className="recent-actions">
-                  <button type="button" onClick={(event) => { event.stopPropagation(); onDownload(video); }}>视频下载</button>
-                  <button type="button" onClick={(event) => { event.stopPropagation(); onSummary(video); }}>转录</button>
-                  <a href={`/history?video=${video.id}`} onClick={(event) => event.stopPropagation()}>查看历史任务</a>
+                  {imageOnly ? (
+                    <button type="button" onClick={(event) => { event.stopPropagation(); onOpen(video); }}>查看图片</button>
+                  ) : (
+                    <>
+                      <button type="button" onClick={(event) => { event.stopPropagation(); onDownload(video); }}>视频下载</button>
+                      <button type="button" onClick={(event) => { event.stopPropagation(); onSummary(video); }}>转录</button>
+                    </>
+                  )}
+                  <a href={`/history?video=${video.id}&media=${imageOnly ? 'image' : 'video'}`} onClick={(event) => event.stopPropagation()}>查看历史任务</a>
                   <a href={`/videos/${video.id}`} onClick={(event) => event.stopPropagation()}>打开详情</a>
                 </div>
               </article>

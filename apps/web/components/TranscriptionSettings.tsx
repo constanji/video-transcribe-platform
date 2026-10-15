@@ -123,7 +123,7 @@ export default function TranscriptionSettings({
       <label className="setting-row"><span><strong>音频提取格式</strong></span><input value={data.audio_format || 'wav'} onChange={(e) => patch({ audio_format: e.target.value })} /></label>
       <label className="setting-row"><span><strong>音频采样率</strong></span><input type="number" value={data.sample_rate || 16000} onChange={(e) => patch({ sample_rate: Number(e.target.value) })} /></label>
       <label className="setting-row"><span><strong>失败时回退 MP4</strong></span><input type="checkbox" checked={data.fallback_to_mp4 !== false} onChange={(e) => patch({ fallback_to_mp4: e.target.checked })} /></label>
-      <label className="setting-row"><span><strong>最大并发转录任务</strong></span><input type="number" value={data.max_concurrency || 1} onChange={(e) => patch({ max_concurrency: Number(e.target.value) })} /></label>
+      <label className="setting-row"><span><strong>最大并发转录任务</strong><small>MOSS 单模型实例为保证稳定性固定串行执行</small></span><input type="number" value={1} disabled /></label>
       <label className="setting-row"><span><strong>保留时间戳</strong></span><input type="checkbox" checked={data.keep_timestamps !== false} onChange={(e) => patch({ keep_timestamps: e.target.checked })} /></label>
       <h3 className="subheading">总结配置</h3>
       <label className="setting-row">

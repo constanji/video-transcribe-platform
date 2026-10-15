@@ -7,6 +7,7 @@ const ADAPTERS = [
   { id: 'weibo', name: '微博解析器' },
   { id: 'xhs', name: '小红书解析器' },
   { id: 'xiaoheihe', name: '小黑盒解析器' },
+  { id: 'zhihu', name: '知乎解析器' },
   { id: 'youtube', name: 'YouTube 解析器' },
   { id: 'tiktok', name: 'TikTok 解析器' },
   { id: 'twitter', name: 'Twitter 解析器' },
@@ -133,6 +134,12 @@ export default function ParserSettings({
                   <strong>短链需要腾讯元宝 Cookie</strong>
                   <p>点击右侧按钮打开元宝并登录，在浏览器开发者工具中复制 Cookie，粘贴到上方后保存。</p>
                   <a className="outline-button" href="https://yuanbao.tencent.com" target="_blank" rel="noreferrer">打开腾讯元宝 ↗</a>
+                </div>
+              )}
+              {adapter.id === 'youtube' && (
+                <div className="shipinhao-guide">
+                  <strong>使用 yt-dlp，不经过 Metube</strong>
+                  <p>本机未部署 Metube。稳定解析需要在上方填写 YouTube Cookie。</p>
                 </div>
               )}
               {adapter.id === 'bilibili' && (

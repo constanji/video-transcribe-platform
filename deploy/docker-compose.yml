@@ -6,7 +6,8 @@ services:
       POSTGRES_USER: media
       POSTGRES_PASSWORD: media
     volumes: [media_pg:/var/lib/postgresql/data]
-    ports: ["5432:5432"]
+    # 宿主机 5432 已被 BidMaster-Pro 的 postgres 占用，本服务映射到 5433。
+    ports: ["5433:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U media -d media_platform"]
       interval: 3s
@@ -46,10 +47,12 @@ services:
       SUMMARY_MODEL_PATH: /models/summary/Qwen3.5-4B-Q4_K_M.gguf
       LLAMA_CLI: /usr/local/bin/llama-cli
       MOSS_PRELOAD: "1"
+      MOSS_MEDIA_ROOT: /data
+      MOSS_MAX_SOURCE_MB: ${MOSS_MAX_SOURCE_MB:-512}
       # 分块结果磁盘缓存：失败/取消后续转时复用已完成的块（挂到宿主机方便清理）。
       MOSS_CACHE_DIR: /cache
     # 只绑回环，与服务器部署保持同一套隔离约定（api 在宿主机/同网络内访问）。
-    ports: ["127.0.0.1:${MOSS_PORT:-9000}:9000"]
+    ports: ["127.0.0.1:${MOSS_PORT:-19300}:9000"]
     volumes:
       - "${ASSET_ROOT:-../deployment-assets/models}:/models:ro"
       - ../storage:/data:ro

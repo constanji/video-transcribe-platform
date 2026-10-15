@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import threading
 import time
 import traceback
 import uuid
+import zipfile
 import base64
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,8 +26,9 @@ from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
-from .parser_runtime import ParseError, bili_play_url, cover_referer, download_bytes, parse_media
+from .parser_runtime import ParseError, bili_play_url, cover_referer, download_bytes, download_to_path, parse_media
 from .auth import get_current_user, get_current_user_flex, require_admin
 from .templates_loader import HOME_DEFAULT_NAMES, find_builtin_template, load_builtin_templates, template_sort_key
 from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Text, create_engine, func, or_, select, text
@@ -47,6 +50,15 @@ MEETING_DIR = STORAGE_ROOT / "meetings"
 MEETING_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_DIR = STORAGE_ROOT / "tmp"
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
+PREVIEW_DIR = STORAGE_ROOT / "previews"
+PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+IMAGE_MEDIA_TYPES = {
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
+    "gif": "image/gif",
+}
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 UPLOAD_FORMATS = {".mp3": "audio", ".wav": "audio", ".m4a": "audio", ".mp4": "video", ".webm": "video", ".mov": "video"}
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -363,11 +375,25 @@ class ParseRequest(BaseModel):
     url: str = Field(min_length=3)
 
 
+class ZipDownloadRequest(BaseModel):
+    variant_ids: list[str] = Field(default_factory=list)
+
+
 class JobRequest(BaseModel):
     video_id: str
     job_type: str = Field(pattern="^(download|transcribe|summarize)$")
     model: str | None = None
     template_id: str | None = None
+
+
+class TranscriptUpdateRequest(BaseModel):
+    text: str | None = None
+    segments: list[dict[str, Any]] | None = None
+    speaker_names: dict[str, str] = Field(default_factory=dict)
+
+
+class SummaryUpdateRequest(BaseModel):
+    content_markdown: str = Field(min_length=1)
 
 
 class TemplateRequest(BaseModel):
@@ -555,29 +581,13 @@ PLATFORMS = [
     {"id": "xhs", "name": "小红书", "logo": "xhs.png", "featured": True},
     {"id": "youtube", "name": "YouTube", "logo": "youtube.png", "featured": True},
     {"id": "tiktok", "name": "TikTok", "logo": "tiktok.png", "featured": True},
-    {"id": "zhihu", "name": "知乎", "logo": None, "featured": True},
+    {"id": "zhihu", "name": "知乎", "logo": "zhihu.svg", "featured": True},
     {"id": "twitter", "name": "Twitter", "logo": "twitter.png", "featured": False},
     {"id": "pixiv", "name": "Pixiv", "logo": "pixiv.png", "featured": False},
-    {"id": "xiaoheihe", "name": "小黑盒", "logo": None, "featured": False},
-    {"id": "shipinhao", "name": "微信视频号", "logo": None, "featured": False},
-    {"id": "qzone", "name": "QQ空间", "logo": None, "featured": False},
+    {"id": "xiaoheihe", "name": "小黑盒", "logo": "xiaoheihe.svg", "featured": False},
+    {"id": "shipinhao", "name": "微信视频号", "logo": "shipinhao.svg", "featured": False},
+    {"id": "qzone", "name": "QQ空间", "logo": "qzone.svg", "featured": False},
 ]
-
-PLATFORM_HINTS = (
-    ("bilibili", ("bilibili.com", "b23.tv")),
-    ("douyin", ("douyin.com", "iesdouyin.com")),
-    ("kuaishou", ("kuaishou.com", "gifshow.com")),
-    ("weibo", ("weibo.com", "weibo.cn")),
-    ("xhs", ("xiaohongshu.com", "xhslink.com")),
-    ("youtube", ("youtube.com", "youtu.be")),
-    ("tiktok", ("tiktok.com",)),
-    ("zhihu", ("zhihu.com",)),
-    ("twitter", ("twitter.com", "x.com")),
-    ("pixiv", ("pixiv.net",)),
-    ("xiaoheihe", ("xiaoheihe.cn",)),
-    ("shipinhao", ("channels.weixin.qq.com",)),
-    ("qzone", ("qzone.qq.com",)),
-)
 
 DEFAULT_PARSER = {
     "log_level": "info",
@@ -626,14 +636,6 @@ DEFAULT_SERVICES = {
 }
 
 SETTING_DEFAULTS = {"parser": DEFAULT_PARSER, "transcription": DEFAULT_TRANSCRIPTION, "services": DEFAULT_SERVICES}
-
-
-def detect_platform(url: str) -> str:
-    lowered = url.lower()
-    for platform_id, hints in PLATFORM_HINTS:
-        if any(hint in lowered for hint in hints):
-            return platform_id
-    return "unknown"
 
 
 def safe_filename(title: str, ext: str) -> str:
@@ -759,6 +761,24 @@ def current_transcription() -> dict[str, Any]:
         return merge_settings("transcription", record.value_json if record else {})
 
 
+def current_parser_settings(session: Session | None = None) -> dict[str, Any]:
+    if session is not None:
+        record = session.get(ConfigRecord, "parser")
+        return merge_settings("parser", record.value_json if record else {})
+    with SessionLocal() as local_session:
+        record = local_session.get(ConfigRecord, "parser")
+        return merge_settings("parser", record.value_json if record else {})
+
+
+def _download_options(session: Session | None = None) -> dict[str, Any]:
+    settings = current_parser_settings(session)
+    return {
+        "max_bytes": max(1, int(settings.get("source_max_size") or 90)) * 1024 * 1024,
+        "timeout": max(3.0, min(float(settings.get("download_timeout") or 280), 600.0)),
+        "retries": max(0, min(int(settings.get("download_retry_times") or 2), 5)),
+    }
+
+
 def moss_service_url(transcription: dict[str, Any] | None = None) -> str:
     settings = transcription if transcription is not None else current_transcription()
     return str(os.getenv("MOSS_URL") or settings.get("moss_url") or "http://localhost:9000").rstrip("/")
@@ -877,10 +897,14 @@ def parse(request: ParseRequest, user: Any = Depends(get_current_user), session:
             "parser",
             (session.get(ConfigRecord, "parser") or ConfigRecord(key="parser", value_json={})).value_json,
         )
-        shipinhao = (parser_settings.get("parsers") or {}).get("shipinhao") or {}
-        parsed = parse_media(request.url, shipinhao_cookie=str(shipinhao.get("cookies") or ""))
+        parsed = parse_media(request.url, settings=parser_settings)
     except ParseError as exc:
         raise HTTPException(502, str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "解析服务访问来源网站失败，请稍后重试") from exc
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(502, "解析器处理链接时发生异常，请稍后重试") from exc
     # 数据隔离：重复资产只复用本人（或 admin 视角）的，不碰别人的视频。
     related = [item for item in _related_videos(session, parsed) if user.role == "admin" or item.user_id == user.id]
     existing = related[0] if related else None
@@ -904,20 +928,27 @@ def parse(request: ParseRequest, user: Any = Depends(get_current_user), session:
         cover_path = _store_cover(video.id, parsed.thumbnail_url, parsed.source_url)
         if cover_path:
             video.thumbnail_path = str(cover_path)
+    existing_variants: dict[tuple[str, str, str], list[MediaVariant]] = {}
     for old in session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video.id)).all():
-        session.delete(old)
+        key = (old.media_type or "", old.format or "", old.quality or "")
+        existing_variants.setdefault(key, []).append(old)
     for item in parsed.variants:
-        session.add(MediaVariant(
-            video_asset_id=video.id,
-            format=item.format,
-            quality=item.quality,
-            media_type=item.media_type,
-            source_url=item.source_url,
-            file_size=item.file_size,
-            download_status="available",
-        ))
-    for extra in related[1:]:
-        session.delete(extra)
+        key = (item.media_type or "", item.format or "", item.quality or "")
+        matches = existing_variants.get(key) or []
+        variant = matches.pop(0) if matches else MediaVariant(video_asset_id=video.id)
+        variant.format = item.format
+        variant.quality = item.quality
+        variant.media_type = item.media_type
+        variant.source_url = item.source_url
+        variant.file_size = item.file_size or variant.file_size
+        variant.download_status = "downloaded" if variant.local_path else "available"
+        session.add(variant)
+    for stale_items in existing_variants.values():
+        for stale in stale_items:
+            for preview in PREVIEW_DIR.glob(f"{stale.id}.*"):
+                preview.unlink(missing_ok=True)
+            session.delete(stale)
+    # 不再自动删除其它重复资产：它们可能包含用户已经校对的转录或纪要。
     session.add(ProcessingJob(video_asset_id=video.id, job_type="parse", status="completed", current_stage="parsed", started_at=now, finished_at=now, progress=1))
     session.commit()
     session.refresh(video)
@@ -928,7 +959,7 @@ def _store_cover(video_id: str, url: str | None, referer: str) -> Path | None:
     if not url:
         return None
     try:
-        payload = download_bytes(url, referer=cover_referer(url, referer))
+        payload = download_bytes(url, referer=cover_referer(url, referer), max_bytes=10 * 1024 * 1024, timeout=30, retries=1)
     except Exception:
         return None
     if not payload:
@@ -1097,15 +1128,31 @@ def list_videos(user: Any = Depends(get_current_user), session: Session = Depend
     return [video_dict(v, session) for v in session.scalars(query).all()]
 
 
+def _is_image_record(item: dict[str, Any]) -> bool:
+    variants = item.get("variants") or []
+    kinds = {variant.get("media_type") for variant in variants}
+    return "image" in kinds and not ({"video", "audio"} & kinds)
+
+
 @app.get("/api/videos/recent")
-def recent_videos(user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+def recent_videos(user: Any = Depends(get_current_user), session: Session = Depends(db_session), media: str | None = None):
     videos = session.scalars(
         select(VideoAsset)
         .where(VideoAsset.platform != "meeting", *video_scope(user))
         .order_by(func.coalesce(VideoAsset.last_processed_at, VideoAsset.updated_at).desc())
-        .limit(6)
+        .limit(80 if media in {"video", "image"} else 6)
     ).all()
-    return [video_dict(v, session) for v in videos]
+    rows = []
+    for video in videos:
+        item = video_dict(video, session)
+        if media == "image" and not _is_image_record(item):
+            continue
+        if media == "video" and _is_image_record(item):
+            continue
+        rows.append(item)
+        if len(rows) >= 6:
+            break
+    return rows
 
 
 @app.get("/api/history")
@@ -1136,8 +1183,8 @@ def history(
 
 @app.get("/api/history/{video_id}")
 def history_detail(video_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
-    get_owned_video(session, user, video_id)
-    return get_video(video_id, session)
+    video = get_owned_video(session, user, video_id)
+    return _video_detail(video, session)
 
 
 @app.get("/api/videos/{video_id}/variants")
@@ -1281,6 +1328,104 @@ def thumbnail(video_id: str, user: Any = Depends(get_current_user_flex), session
     return FileResponse(path, media_type="image/jpeg")
 
 
+def _load_variant_bytes(video: VideoAsset, variant: MediaVariant) -> bytes:
+    if variant.local_path and Path(variant.local_path).exists():
+        return Path(variant.local_path).read_bytes()
+    if not variant.source_url:
+        raise HTTPException(409, "解析器尚未提供可下载文件，无法直接保存到浏览器。")
+    play_url = variant.source_url
+    try:
+        return download_bytes(
+            play_url,
+            referer=cover_referer(play_url, video.source_url),
+            max_bytes=25 * 1024 * 1024,
+            timeout=60,
+            retries=1,
+        )
+    except Exception:
+        refreshed = None
+        if (video.platform or video.source_platform) == "bilibili" and (video.platform_video_id or "").startswith("BV"):
+            refreshed = bili_play_url(video.platform_video_id, variant.quality)
+        if not refreshed:
+            raise HTTPException(502, "下载失败：媒体地址已失效或无法访问")
+        try:
+            payload = download_bytes(refreshed, referer="https://www.bilibili.com/", max_bytes=25 * 1024 * 1024, timeout=60, retries=1)
+        except Exception:
+            raise HTTPException(502, "下载失败：媒体地址已失效或无法访问")
+        variant.source_url = refreshed
+        return payload
+
+
+def _load_variant_file(video: VideoAsset, variant: MediaVariant, session: Session) -> tuple[Path, bool]:
+    if variant.local_path and Path(variant.local_path).exists():
+        return Path(variant.local_path), False
+    if not variant.source_url:
+        raise HTTPException(409, "解析器尚未提供可下载文件，无法直接保存到浏览器。")
+    extension = re.sub(r"[^a-z0-9]", "", (variant.format or "mp4").lower()) or "mp4"
+    destination = TEMP_DIR / f"download-{uuid.uuid4()}.{extension}"
+    options = _download_options(session)
+    play_url = variant.source_url
+    try:
+        return download_to_path(
+            play_url,
+            destination,
+            referer=cover_referer(play_url, video.source_url),
+            **options,
+        ), True
+    except Exception:
+        destination.unlink(missing_ok=True)
+        refreshed = None
+        if (video.platform or video.source_platform) == "bilibili" and (video.platform_video_id or "").startswith("BV"):
+            refreshed = bili_play_url(video.platform_video_id, variant.quality)
+        if not refreshed:
+            try:
+                parsed = parse_media(video.source_url, settings=current_parser_settings(session))
+                candidates = [
+                    item for item in parsed.variants
+                    if item.media_type == variant.media_type and (
+                        (item.format == variant.format and item.quality == variant.quality)
+                        or item.format == variant.format
+                    )
+                ]
+                refreshed = candidates[0].source_url if candidates else None
+            except Exception:
+                refreshed = None
+        if not refreshed:
+            raise HTTPException(502, "下载失败：媒体地址已失效、文件过大或无法访问")
+        try:
+            path = download_to_path(refreshed, destination, referer="https://www.bilibili.com/", **options)
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            raise HTTPException(502, "下载失败：媒体地址已失效、文件过大或无法访问") from exc
+        variant.source_url = refreshed
+        return path, True
+
+
+def _attachment(filename: str, content: bytes, media_type: str) -> Response:
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
+@app.get("/api/videos/{video_id}/preview/{variant_id}")
+def preview_variant(video_id: str, variant_id: str, user: Any = Depends(get_current_user_flex), session: Session = Depends(db_session)):
+    """图片预览走 ?token=，浏览器 img 带不上 Authorization。"""
+    video = get_owned_video(session, user, video_id)
+    variant = session.get(MediaVariant, variant_id)
+    if not variant or variant.video_asset_id != video_id:
+        raise HTTPException(404, "媒体资源不存在")
+    if variant.media_type != "image":
+        raise HTTPException(400, "这个文件不是图片")
+    ext = "jpg" if (variant.format or "").lower() == "jpeg" else (variant.format or "jpg").lower()
+    path = PREVIEW_DIR / f"{variant.id}.{ext}"
+    if not path.exists():
+        path.write_bytes(_load_variant_bytes(video, variant))
+        session.commit()
+    return FileResponse(path, media_type=IMAGE_MEDIA_TYPES.get(ext, "application/octet-stream"))
+
+
 @app.get("/api/videos/{video_id}/download/{variant_id}")
 def download_variant(video_id: str, variant_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     video = get_owned_video(session, user, video_id)
@@ -1291,91 +1436,87 @@ def download_variant(video_id: str, variant_id: str, user: Any = Depends(get_cur
     job = ProcessingJob(video_asset_id=video_id, job_type="download", status="running", current_stage="download", started_at=now)
     session.add(job)
     video.last_processed_at = now
-    if variant.local_path and Path(variant.local_path).exists():
-        job.status = "completed"
-        job.current_stage = "completed"
-        job.finished_at = now
-        job.progress = 1
-        variant.download_status = "downloaded"
+    try:
+        path, temporary = _load_variant_file(video, variant, session)
+    except HTTPException as exc:
+        job.status = "failed"
+        job.finished_at = datetime.now(timezone.utc)
+        job.error_code = "DOWNLOAD_FAILED"
+        job.error_message = str(exc.detail)
+        variant.download_status = "failed"
         session.commit()
-        filename = safe_filename(video.title, variant.format or "mp4")
-        return FileResponse(
-            variant.local_path,
-            media_type="video/mp4" if variant.format == "mp4" else "application/octet-stream",
-            filename=filename,
-            content_disposition_type="attachment",
-            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
-        )
-    if variant.source_url:
-        play_url = variant.source_url
-        try:
-            payload = download_bytes(play_url, referer=cover_referer(play_url, video.source_url))
-        except Exception:
-            payload = None
-            if (video.platform or video.source_platform) == "bilibili" and (video.platform_video_id or "").startswith("BV"):
-                play_url = bili_play_url(video.platform_video_id, variant.quality)
-                if play_url:
-                    try:
-                        payload = download_bytes(play_url, referer="https://www.bilibili.com/")
-                        variant.source_url = play_url
-                    except Exception:
-                        payload = None
-            if payload is None:
-                job.status = "failed"
-                job.finished_at = now
-                job.error_code = "DOWNLOAD_FAILED"
-                job.error_message = "下载失败：媒体地址已失效或无法访问"
-                variant.download_status = "failed"
-                session.commit()
-                raise HTTPException(502, job.error_message)
-        job.status = "completed"
-        job.current_stage = "completed"
-        job.finished_at = now
-        job.progress = 1
-        variant.download_status = "downloaded"
-        variant.file_size = len(payload)
-        session.commit()
-        filename = safe_filename(video.title, variant.format or "mp4")
-        return Response(
-            content=payload,
-            media_type="video/mp4" if variant.format == "mp4" else "application/octet-stream",
-            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
-        )
-    job.status = "failed"
-    job.current_stage = "download"
-    job.finished_at = now
-    job.error_code = "ADAPTER_PENDING"
-    job.error_message = "解析器尚未提供可下载文件，无法直接保存到浏览器。"
-    variant.download_status = "failed"
+        raise
+    job.status = "completed"
+    job.current_stage = "completed"
+    job.finished_at = datetime.now(timezone.utc)
+    job.progress = 1
+    variant.download_status = "downloaded"
+    variant.file_size = path.stat().st_size
     session.commit()
-    raise HTTPException(409, job.error_message)
-
-
-@app.post("/api/jobs")
-def create_job(request: JobRequest, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
-    get_owned_video(session, user, request.video_id)
-    job = ProcessingJob(video_asset_id=request.video_id, job_type=request.job_type, current_stage="queued")
-    session.add(job); session.commit(); session.refresh(job)
-    return {"id": job.id, "video_id": job.video_asset_id, "status": job.status, "progress": job.progress, "current_stage": job.current_stage}
-
-
-def _create_media_job(session: Session, video: VideoAsset, job_type: str, message: str) -> ProcessingJob:
-    now = datetime.now(timezone.utc)
-    job = ProcessingJob(
-        video_asset_id=video.id,
-        job_type=job_type,
-        status="running",
-        input_media_type="audio",
-        current_stage="queued",
-        started_at=now,
-        progress=0.04,
-        logs_json=[{"at": now.isoformat(), "level": "info", "message": message}],
+    filename = safe_filename(video.title, variant.format or "mp4")
+    media_type = IMAGE_MEDIA_TYPES.get((variant.format or "").lower(), "video/mp4" if variant.format == "mp4" else "application/octet-stream")
+    return FileResponse(
+        path,
+        filename=filename,
+        media_type=media_type,
+        background=BackgroundTask(path.unlink, missing_ok=True) if temporary else None,
     )
-    video.last_processed_at = now
-    session.add(job)
+
+
+@app.post("/api/videos/{video_id}/download-zip")
+def download_zip(video_id: str, request: ZipDownloadRequest, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    video = get_owned_video(session, user, video_id)
+    chosen = list(session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video_id)).all())
+    if request.variant_ids:
+        wanted = set(request.variant_ids)
+        chosen = [item for item in chosen if item.id in wanted]
+    chosen = [item for item in chosen if item.media_type == "image"]
+    if not chosen:
+        raise HTTPException(400, "没有可打包的图片")
+    if len(chosen) > 40:
+        raise HTTPException(400, "一次最多打包 40 张图片")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        for index, variant in enumerate(chosen, start=1):
+            ext = "jpg" if (variant.format or "").lower() == "jpeg" else (variant.format or "jpg").lower()
+            archive.writestr(f"{index:02d}.{ext}", _load_variant_bytes(video, variant))
     session.commit()
-    session.refresh(job)
-    return job
+    return _attachment(safe_filename(video.title or "images", "zip"), buffer.getvalue(), "application/zip")
+
+
+_MEDIA_JOB_CREATE_LOCK = threading.RLock()
+
+
+def _create_media_job(
+    session: Session,
+    video: VideoAsset,
+    job_type: str,
+    message: str,
+    context: dict[str, Any] | None = None,
+) -> ProcessingJob:
+    # PostgreSQL 行锁负责多 worker；进程锁兼容 SQLite 和本机单进程开发。
+    with _MEDIA_JOB_CREATE_LOCK:
+        if session.bind and session.bind.dialect.name == "postgresql":
+            session.scalar(select(VideoAsset).where(VideoAsset.id == video.id).with_for_update())
+        if _has_active_job(session, video.id):
+            raise HTTPException(409, "该媒体已有处理任务进行中，请勿重复提交")
+        now = datetime.now(timezone.utc)
+        job = ProcessingJob(
+            video_asset_id=video.id,
+            job_type=job_type,
+            status="running",
+            input_media_type="audio",
+            current_stage="queued",
+            started_at=now,
+            progress=0.04,
+            progress_json=dict(context or {}),
+            logs_json=[{"at": now.isoformat(), "level": "info", "message": message}],
+        )
+        video.last_processed_at = now
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        return job
 
 
 def _moss_busy_message(settings: dict[str, Any] | None = None) -> str | None:
@@ -1466,6 +1607,16 @@ def cancel_job(job_id: str, user: Any = Depends(get_current_user), session: Sess
     job.current_stage = "cancelled"
     job.error_message = "任务已取消"
     job.finished_at = datetime.now(timezone.utc)
+    meeting = session.scalars(select(Meeting).where(Meeting.video_asset_id == job.video_asset_id)).first()
+    if meeting is not None:
+        # 取消总结不应抹掉可用转录；取消转录则进入可重试失败态。
+        if job.job_type == "summarize" and _latest_transcript(session, job.video_asset_id):
+            meeting.status = "ready"
+            meeting.error_message = "纪要生成已取消"
+        else:
+            meeting.status = "failed"
+            meeting.error_message = "转录任务已取消"
+        meeting.updated_at = datetime.now(timezone.utc)
     session.commit()
     return job_dict(job)
 
@@ -1473,13 +1624,15 @@ def cancel_job(job_id: str, user: Any = Depends(get_current_user), session: Sess
 @app.post("/api/videos/{video_id}/transcribe")
 def transcribe(video_id: str, payload: dict[str, Any] | None = None, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     video = get_owned_video(session, user, video_id)
+    if _has_active_job(session, video_id, "transcribe"):
+        raise HTTPException(409, "该任务正在转录，请勿重复提交")
     body = payload or {}
     settings = current_transcription()
     ensure_moss_available(settings)
     language = (body.get("transcription") or {}).get("language") or settings.get("default_language") or "zh"
     if language not in {"zh", "auto", "en"}:
         raise HTTPException(400, "不支持的转录语言")
-    job = _create_media_job(session, video, "transcribe", "转录任务已创建")
+    job = _create_media_job(session, video, "transcribe", "转录任务已创建", {"language": language})
     threading.Thread(target=execute_transcribe_job, args=(job.id, language), daemon=True).start()
     return job_dict(job)
 
@@ -1494,7 +1647,7 @@ def _append_job_log(session: Session, job: ProcessingJob, message: str, level: s
     if progress is not None:
         job.progress = progress
     if detail is not None:
-        job.progress_json = detail
+        job.progress_json = {**(job.progress_json or {}), **detail}
     if job.status == "queued":
         job.status = "running"
         job.started_at = job.started_at or datetime.now(timezone.utc)
@@ -1608,7 +1761,21 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
     settings = merge_settings("transcription", (session.get(ConfigRecord, "transcription") or ConfigRecord(key="transcription", value_json={})).value_json)
     moss_url = moss_service_url(settings)
     variants = session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == job.video_asset_id)).all()
-    media = next((item for item in variants if item.source_url or item.local_path), None)
+    playable = [
+        item for item in variants
+        if item.media_type in {"audio", "video"} and (item.source_url or item.local_path)
+    ]
+
+    def media_rank(item: MediaVariant) -> tuple[int, int]:
+        is_local = bool(item.local_path and Path(item.local_path).exists())
+        is_hls = ".m3u8" in str(item.source_url or "").lower() or (item.format or "").lower() == "m3u8"
+        if item.media_type == "audio":
+            return (0 if is_local else 1, 0)
+        if is_local:
+            return (2, 0)
+        return (4 if is_hls else 3, 0)
+
+    media = min(playable, key=media_rank) if playable else None
     _append_job_log(session, job, f"开始处理「{video.title}」", "info", "extracting_audio", 0.08)
     if not media:
         _fail_job(session, job, "当前解析结果没有可下载媒体，无法提取音频", "extracting_audio")
@@ -1617,21 +1784,60 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
     _append_job_log(session, job, f"找到媒体：{label}", "info", "extracting_audio", 0.16)
     local_media_path = path_for_moss(media.local_path) if media.local_path and Path(media.local_path).exists() else None
     media_url = None if local_media_path else media.source_url
+    referer = cover_referer(media_url or video.source_url, video.source_url)
+    download_options = _download_options(session)
+    if media_url and ".m3u8" in media_url.lower():
+        # MOSS 只收文件或直链。m3u8 先在 API 侧用 yt-dlp 收成 mp4，再交给转录。
+        saved = TEMP_DIR / f"hls-{job.id}.mp4"
+        def cancelled() -> bool:
+            with SessionLocal() as check_session:
+                current = check_session.get(ProcessingJob, job.id)
+                return current is None or current.status == "cancelled"
+
+        download_to_path(media_url, saved, referer=referer, cancel_check=cancelled, **download_options)
+        if cancelled():
+            saved.unlink(missing_ok=True)
+            return None
+        local_media_path = path_for_moss(str(saved))
+        media_url = None
     _append_job_log(session, job, "正在提交转录任务", "info", "transcribe_queued", 0.28)
+    retries = max(0, min(int(settings.get("retry_times") or 0), 5))
+    created: httpx.Response | None = None
     try:
         with httpx.Client(timeout=20.0) as client:
-            created = client.post(
-                f"{moss_url}/v1/transcriptions",
-                json={
-                    "media_url": media_url,
-                    "media_path": local_media_path,
-                    "language": language or "zh",
-                    "duration_seconds": video.duration_seconds,
-                    "referer": video.source_url,
-                },
-            )
-    except httpx.RequestError as exc:
+            for attempt in range(retries + 1):
+                created = client.post(
+                    f"{moss_url}/v1/transcriptions",
+                    json={
+                        "media_url": media_url,
+                        "media_path": local_media_path,
+                        "language": language or "zh",
+                        "duration_seconds": video.duration_seconds,
+                        "referer": referer,
+                        "max_source_bytes": download_options["max_bytes"],
+                    },
+                )
+                payload = created.json() if created.headers.get("content-type", "").startswith("application/json") else {}
+                if created.status_code != 503 or not isinstance(payload, dict) or not payload.get("busy") or attempt >= retries:
+                    break
+                delay = max(1.0, min(float(payload.get("retry_after") or 2), 15.0))
+                _append_job_log(
+                    session,
+                    job,
+                    f"转录服务繁忙，{delay:g} 秒后重试（{attempt + 1}/{retries}）",
+                    "warning",
+                    "transcribe_queued",
+                    0.28,
+                )
+                time.sleep(delay)
+                current = session.get(ProcessingJob, job.id)
+                if not current or current.status == "cancelled":
+                    return None
+    except (httpx.RequestError, ValueError) as exc:
         _fail_job(session, job, f"无法连接转录服务 {moss_url}：{exc}", "transcribe_queued")
+        return None
+    if created is None:
+        _fail_job(session, job, "转录服务没有返回任务", "transcribe_queued")
         return None
     if created.status_code >= 400:
         detail = created.text
@@ -1642,6 +1848,12 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
         _fail_job(session, job, f"转录服务拒绝任务：{detail}", "transcribe_queued")
         return None
     moss_id = created.json().get("id")
+    session.refresh(job)
+    job.progress_json = {**(job.progress_json or {}), "moss_job_id": moss_id}
+    session.commit()
+    if job.status == "cancelled":
+        _cancel_moss_transcription(moss_url, moss_id)
+        return None
     _append_job_log(session, job, "转录服务已接收", "info", "transcribing", 0.3, {
         "stage": "queued",
         "message": "转录服务已接收",
@@ -1665,6 +1877,7 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
         try:
             job = session.get(ProcessingJob, job.id)
             if not job or job.status == "cancelled":
+                _cancel_moss_transcription(moss_url, moss_id)
                 return None
             with httpx.Client(timeout=15.0) as client:
                 status = client.get(f"{moss_url}/v1/transcriptions/{moss_id}")
@@ -1791,21 +2004,86 @@ def _local_summary(settings: dict[str, Any], prompt_payload: dict[str, Any]) -> 
     return text, str(payload.get("model") or settings.get("summary_model") or "local")
 
 
+def _run_summary_model(
+    settings: dict[str, Any],
+    prompt: str,
+    title: str,
+    template: SummaryTemplate | None = None,
+    max_tokens: int = 1024,
+) -> tuple[str, str]:
+    provider = str(settings.get("default_provider") or "local")
+    if provider in {"openai", "ollama"} or settings.get("api_base_url"):
+        return _chat_summary(settings, prompt)
+    return _local_summary(settings, {
+        "prompt": prompt,
+        "text": "",
+        "title": title,
+        "template_name": template.name if template else None,
+        "sections": template.sections_json if template else [],
+        "max_tokens": max_tokens,
+    })
+
+
 def _wait_summary(session: Session, job: ProcessingJob, settings: dict[str, Any], template: SummaryTemplate | None, transcript: Transcript, title: str) -> tuple[str, str]:
-    box: dict[str, Any] = {"done": False, "result": None, "error": None}
+    box: dict[str, Any] = {
+        "done": False,
+        "result": None,
+        "error": None,
+        "message": "正在准备转写内容",
+        "done_units": 0,
+        "total_units": 1,
+    }
 
     def worker() -> None:
         try:
-            provider = str(settings.get("default_provider") or "local")
-            if provider in {"openai", "ollama"} or settings.get("api_base_url"):
-                box["result"] = _chat_summary(settings, _summary_user_prompt(template, transcript.text, title))
-            else:
-                box["result"] = _local_summary(settings, {
-                    "text": transcript.text,
-                    "title": title,
-                    "template_name": template.name if template else None,
-                    "sections": template.sections_json if template else [],
-                })
+            source = _transcript_summary_source(transcript)
+            chunk_limit = max(1000, min(int(settings.get("chunk_size") or 4000), 5000))
+            context_limit = max(chunk_limit, min(int((settings.get("max_context") or 8000) * 0.65), 6000))
+            chunks = _split_summary_text(source, chunk_limit)
+            box["total_units"] = len(chunks) + 1
+            notes: list[str] = []
+            if len(chunks) > 1:
+                for index, chunk in enumerate(chunks, start=1):
+                    box["message"] = f"正在提取第 {index}/{len(chunks)} 段的决策与行动项"
+                    prompt = "\n".join([
+                        f"这是会议「{title}」的第 {index}/{len(chunks)} 段转写。",
+                        "提取本段明确出现的事实、议题、结论、分歧、行动项、负责人、截止时间和原始时间戳。",
+                        "用紧凑 Markdown 列表输出；未提及的信息不要猜测，不要写套话。",
+                        "",
+                        chunk,
+                    ])
+                    note, _model = _run_summary_model(settings, prompt, title, max_tokens=768)
+                    notes.append(note)
+                    box["done_units"] = index
+                source = "\n\n".join(
+                    f"### 分段记录 {index}\n{note}" for index, note in enumerate(notes, start=1)
+                )
+                reduction_round = 1
+                while len(source) > context_limit:
+                    groups = _split_summary_text(source, chunk_limit)
+                    reduced: list[str] = []
+                    box["total_units"] += len(groups)
+                    for index, group in enumerate(groups, start=1):
+                        box["message"] = f"正在合并长会议笔记（第 {reduction_round} 轮 {index}/{len(groups)}）"
+                        compact, _model = _run_summary_model(
+                            settings,
+                            "合并下面的会议分段笔记，去重但保留所有明确决策、行动项、负责人、日期和时间戳。禁止推测。\n\n" + group,
+                            title,
+                            max_tokens=896,
+                        )
+                        reduced.append(compact)
+                        box["done_units"] += 1
+                    source = "\n\n".join(reduced)
+                    reduction_round += 1
+            box["message"] = "正在生成最终会议纪要"
+            box["result"] = _run_summary_model(
+                settings,
+                _summary_user_prompt(template, source, title),
+                title,
+                template,
+                max_tokens=1536,
+            )
+            box["done_units"] = box["total_units"]
         except Exception as exc:
             box["error"] = exc
         finally:
@@ -1819,27 +2097,92 @@ def _wait_summary(session: Session, job: ProcessingJob, settings: dict[str, Any]
         if not current or current.status == "cancelled":
             raise RuntimeError("任务已取消")
         elapsed = int(time.time() - started)
-        progress = min(0.96, 0.82 + elapsed / 500)
+        unit_ratio = float(box["done_units"]) / max(1, int(box["total_units"]))
+        progress = min(0.96, max(0.82 + elapsed / 500, 0.82 + unit_ratio * 0.13))
+        message = str(box.get("message") or "正在生成总结")
         _append_job_log(
             session,
             current,
-            f"正在生成总结",
+            message,
             "info",
             "summarizing",
             progress,
-            {"stage": "summarizing", "message": f"正在生成总结，已用 {elapsed} 秒", "percent": int(progress * 100), "elapsed_seconds": elapsed},
+            {
+                "stage": "summarizing",
+                "message": f"{message}，已用 {elapsed} 秒",
+                "percent": int(progress * 100),
+                "elapsed_seconds": elapsed,
+                "done_chunks": box["done_units"],
+                "total_chunks": box["total_units"],
+            },
         )
     if box["error"]:
         raise box["error"]
     return box["result"]
 
 
+def _fmt_summary_clock(value_ms: Any) -> str:
+    try:
+        seconds = max(0, int(float(value_ms or 0) / 1000))
+    except (TypeError, ValueError):
+        seconds = 0
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
+
+
+def _transcript_summary_source(transcript: Transcript) -> str:
+    """给总结模型保留时间戳与说话人，避免模板要求引用时只能编造。"""
+    lines: list[str] = []
+    for segment in transcript.segments_json or []:
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            continue
+        if segment.get("start_ms") is not None:
+            start_ms = segment.get("start_ms")
+        else:
+            try:
+                raw_start = float(segment.get("start") or 0)
+            except (TypeError, ValueError):
+                raw_start = 0
+            start_ms = raw_start if raw_start > 1000 else raw_start * 1000
+        stamp = _fmt_summary_clock(start_ms)
+        speaker = str(segment.get("speaker") or "发言人未标注").strip()
+        lines.append(f"[{stamp}] {speaker}：{text}")
+    return "\n".join(lines) if lines else transcript.text.strip()
+
+
+def _split_summary_text(text: str, limit: int = 4500) -> list[str]:
+    """按行切块并限制上下文；超长单行再硬切，保证任何录音都不会只取开头。"""
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for raw_line in text.splitlines() or [text]:
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [line[index:index + limit] for index in range(0, len(line), limit)]
+        for part in parts:
+            if current and size + len(part) + 1 > limit:
+                chunks.append("\n".join(current))
+                current, size = [], 0
+            current.append(part)
+            size += len(part) + 1
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [""]
+
+
 def _summary_user_prompt(template: SummaryTemplate | None, text: str, title: str) -> str:
     sections = (template.sections_json if template else None) or [{"title": "摘要", "instruction": "概括主要内容"}]
-    lines = [f"请总结视频「{title}」的转写。按以下章节输出 Markdown；章节列表只是格式要求，直接输出正文，禁止复述章节标题下的说明文字："]
+    lines = [
+        f"请总结「{title}」的转写。按以下章节输出 Markdown；章节列表只是格式要求，直接输出正文，禁止复述说明文字。",
+        "只能依据转写内容；负责人、日期或结论未明确时写“未提及”，禁止推测。",
+        "引用行动项或关键决策时尽量保留输入中的时间戳。",
+    ]
     for item in sections:
         lines.append(f"## {item.get('title')}\n{item.get('instruction') or ''}")
-    lines.extend(["", "转写：", text[:14000]])
+    lines.extend(["", "转写：", text])
     return "\n".join(lines)
 
 
@@ -1862,11 +2205,14 @@ def _generate_summary(session: Session, job: ProcessingJob, video: VideoAsset, t
         if not content:
             raise RuntimeError("总结模型没有返回可用结果，请重试")
     except Exception as exc:
+        current = session.get(ProcessingJob, job.id)
+        if not current or current.status == "cancelled":
+            return
         _fail_job(session, job, f"总结失败：{exc}", "summarizing")
         return
     job = session.get(ProcessingJob, job.id)
     video = session.get(VideoAsset, video.id)
-    if not job or not video:
+    if not job or not video or job.status == "cancelled":
         return
     item = Summary(
         job_id=job.id,
@@ -1884,44 +2230,62 @@ def _generate_summary(session: Session, job: ProcessingJob, video: VideoAsset, t
 
 
 def execute_transcribe_job(job_id: str, language: str) -> None:
-    with SessionLocal() as session:
-        job = session.get(ProcessingJob, job_id)
-        if not job:
-            return
-        video = session.get(VideoAsset, job.video_asset_id)
-        if not video:
-            _fail_job(session, job, "视频不存在", "queued")
-            return
-        transcript = _run_moss_transcription(session, job, video, language)
-        if not transcript:
-            return
-        job = session.get(ProcessingJob, job_id)
-        if job:
-            _complete_job(session, job, "转录完成")
+    try:
+        with SessionLocal() as session:
+            try:
+                job = session.get(ProcessingJob, job_id)
+                if not job:
+                    return
+                video = session.get(VideoAsset, job.video_asset_id)
+                if not video:
+                    _fail_job(session, job, "视频不存在", "queued")
+                    return
+                transcript = _run_moss_transcription(session, job, video, language)
+                if not transcript:
+                    return
+                job = session.get(ProcessingJob, job_id)
+                if job and job.status != "cancelled":
+                    _complete_job(session, job, "转录完成")
+            except Exception as exc:  # noqa: BLE001 - 后台线程不能留下永久 running 任务
+                session.rollback()
+                current = session.get(ProcessingJob, job_id)
+                if current and current.status not in {"completed", "failed", "cancelled"}:
+                    _fail_job(session, current, f"转录异常中断：{exc}", "transcribing")
+    finally:
+        (TEMP_DIR / f"hls-{job_id}.mp4").unlink(missing_ok=True)
 
 
 def execute_summary_job(job_id: str, template_id: str | None, language: str, reuse_transcript: bool = True) -> None:
-    with SessionLocal() as session:
-        job = session.get(ProcessingJob, job_id)
-        if not job:
-            return
-        video = session.get(VideoAsset, job.video_asset_id)
-        if not video:
-            _fail_job(session, job, "视频不存在", "queued")
-            return
-        transcript = _latest_transcript(session, job.video_asset_id) if reuse_transcript else None
-        if transcript and transcript.text.strip():
-            _append_job_log(session, job, f"使用已有转录，共 {len(transcript.text)} 字", "info", "transcribed", 0.72)
-        else:
-            transcript = _run_moss_transcription(session, job, video, language)
-            if not transcript:
-                return
-        job = session.get(ProcessingJob, job_id)
-        video = session.get(VideoAsset, job.video_asset_id) if job else None
-        if not job or not video:
-            return
-        _append_job_log(session, job, "准备生成总结", "info", "summarize_queued", 0.8)
-        _generate_summary(session, job, video, transcript, template_id)
+    try:
+        with SessionLocal() as session:
+            try:
+                job = session.get(ProcessingJob, job_id)
+                if not job:
+                    return
+                video = session.get(VideoAsset, job.video_asset_id)
+                if not video:
+                    _fail_job(session, job, "视频不存在", "queued")
+                    return
+                transcript = _latest_transcript(session, job.video_asset_id) if reuse_transcript else None
+                if transcript and transcript.text.strip():
+                    _append_job_log(session, job, f"使用已有转录，共 {len(transcript.text)} 字", "info", "transcribed", 0.72)
+                else:
+                    transcript = _run_moss_transcription(session, job, video, language)
+                    if not transcript:
+                        return
+                job = session.get(ProcessingJob, job_id)
+                video = session.get(VideoAsset, job.video_asset_id) if job else None
+                if not job or not video or job.status == "cancelled":
+                    return
+                _append_job_log(session, job, "准备生成总结", "info", "summarize_queued", 0.8)
+                _generate_summary(session, job, video, transcript, template_id)
+            except Exception as exc:  # noqa: BLE001 - 保证总结任务一定进入终态
+                session.rollback()
+                current = session.get(ProcessingJob, job_id)
+                if current and current.status not in {"completed", "failed", "cancelled"}:
+                    _fail_job(session, current, f"总结异常中断：{exc}", "summarizing")
+    finally:
+        (TEMP_DIR / f"hls-{job_id}.mp4").unlink(missing_ok=True)
 
 
 def _summary_ready(settings: dict[str, Any]) -> bool:
@@ -1941,12 +2305,18 @@ def _summary_ready(settings: dict[str, Any]) -> bool:
 @app.post("/api/videos/{video_id}/summary")
 def summary(video_id: str, payload: dict[str, Any] | None = None, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     video = get_owned_video(session, user, video_id)
+    if _has_active_job(session, video_id):
+        raise HTTPException(409, "该媒体已有处理任务进行中，请等待完成")
     settings = current_transcription()
     if not _summary_ready(settings):
         raise HTTPException(400, "总结模型未配置")
     body = payload or {}
     language = (body.get("transcription") or {}).get("language") or settings.get("default_language") or "zh"
-    job = _create_media_job(session, video, "summarize", "总结任务已创建")
+    job = _create_media_job(session, video, "summarize", "总结任务已创建", {
+        "language": language,
+        "template_id": body.get("template_id"),
+        "reuse_transcript": bool(body.get("reuse_transcript", True)),
+    })
     threading.Thread(
         target=execute_summary_job,
         args=(job.id, body.get("template_id"), language, bool(body.get("reuse_transcript", True))),
@@ -1958,6 +2328,8 @@ def summary(video_id: str, payload: dict[str, Any] | None = None, user: Any = De
 @app.post("/api/videos/{video_id}/summaries")
 def summary_from_transcript(video_id: str, payload: dict[str, Any] | None = None, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     video = get_owned_video(session, user, video_id)
+    if _has_active_job(session, video_id):
+        raise HTTPException(409, "该媒体已有处理任务进行中，请等待完成")
     settings = current_transcription()
     if not _summary_ready(settings):
         raise HTTPException(400, "总结模型未配置")
@@ -1965,9 +2337,89 @@ def summary_from_transcript(video_id: str, payload: dict[str, Any] | None = None
         raise HTTPException(409, "还没有转录结果，请先转录")
     body = payload or {}
     language = settings.get("default_language") or "zh"
-    job = _create_media_job(session, video, "summarize", "根据已有转录生成总结")
+    job = _create_media_job(session, video, "summarize", "根据已有转录生成总结", {
+        "language": language,
+        "template_id": body.get("template_id"),
+        "reuse_transcript": True,
+    })
     threading.Thread(target=execute_summary_job, args=(job.id, body.get("template_id"), language, True), daemon=True).start()
     return job_dict(job)
+
+
+@app.patch("/api/transcripts/{transcript_id}")
+def update_transcript(
+    transcript_id: str,
+    payload: TranscriptUpdateRequest,
+    user: Any = Depends(get_current_user),
+    session: Session = Depends(db_session),
+):
+    """校对结果另存为新版本，保留原始 ASR 结果用于回退和审计。"""
+    source = session.get(Transcript, transcript_id)
+    if source is None:
+        raise HTTPException(404, "转录不存在")
+    get_owned_video(session, user, source.video_asset_id)
+    segments = [dict(item) for item in (payload.segments if payload.segments is not None else source.segments_json or [])]
+    names = {str(key): str(value).strip()[:80] for key, value in payload.speaker_names.items() if str(value).strip()}
+    for item in segments:
+        speaker = str(item.get("speaker") or "")
+        if speaker in names:
+            item["speaker"] = names[speaker]
+        item["text"] = str(item.get("text") or "").strip()
+    text = (payload.text or "").strip()
+    if not text and segments:
+        text = "\n".join(str(item.get("text") or "") for item in segments if str(item.get("text") or "").strip())
+    if not text:
+        raise HTTPException(400, "转录内容不能为空")
+    revised = Transcript(
+        job_id=source.job_id,
+        video_asset_id=source.video_asset_id,
+        model=f"{source.model} (校对版)",
+        language=source.language,
+        text=text,
+        segments_json=segments,
+        duration_seconds=source.duration_seconds,
+    )
+    session.add(revised)
+    session.commit()
+    session.refresh(revised)
+    return {
+        "id": revised.id,
+        "model": revised.model,
+        "language": revised.language,
+        "text": revised.text,
+        "segments": revised.segments_json,
+        "created_at": revised.created_at.isoformat(),
+    }
+
+
+@app.patch("/api/summaries/{summary_id}")
+def update_summary(
+    summary_id: str,
+    payload: SummaryUpdateRequest,
+    user: Any = Depends(get_current_user),
+    session: Session = Depends(db_session),
+):
+    """人工编辑纪要时创建新版本，不覆盖模型原稿。"""
+    source = session.get(Summary, summary_id)
+    if source is None:
+        raise HTTPException(404, "纪要不存在")
+    video = get_owned_video(session, user, source.video_asset_id)
+    content = payload.content_markdown.strip()
+    revised = Summary(
+        job_id=source.job_id,
+        video_asset_id=source.video_asset_id,
+        template_id=source.template_id,
+        provider="manual",
+        model="人工编辑",
+        content_markdown=content,
+        source_transcript_id=source.source_transcript_id,
+    )
+    session.add(revised)
+    session.flush()
+    video.latest_summary_id = revised.id
+    session.commit()
+    session.refresh(revised)
+    return summary_dict(revised)
 
 
 @app.get("/api/jobs/{job_id}")
@@ -1978,26 +2430,77 @@ def get_job(job_id: str, user: Any = Depends(get_current_user), session: Session
 
 @app.post("/api/jobs/{job_id}/retry")
 def retry_job(job_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
-    job = get_owned_job(session, user, job_id)
-    job.status, job.progress, job.current_stage, job.error_message = "queued", 0, "queued", None
-    session.commit(); return job_dict(job)
+    previous = get_owned_job(session, user, job_id)
+    if previous.status not in {"failed", "cancelled"}:
+        raise HTTPException(409, "只有失败或已取消的任务可以重试")
+    if _has_active_job(session, previous.video_asset_id):
+        raise HTTPException(409, "该媒体已有处理任务进行中")
+    video = get_owned_video(session, user, previous.video_asset_id)
+    settings = current_transcription()
+    previous_context = previous.progress_json or {}
+    if previous.job_type == "transcribe":
+        ensure_moss_available(settings)
+        language = previous_context.get("language") or settings.get("default_language") or "zh"
+        created = _create_media_job(
+            session,
+            video,
+            "transcribe",
+            f"重试转录任务 {previous.id}",
+            {"language": language, "retry_of": previous.id},
+        )
+        threading.Thread(target=execute_transcribe_job, args=(created.id, language), daemon=True).start()
+    elif previous.job_type == "summarize":
+        if not _summary_ready(settings):
+            raise HTTPException(400, "总结模型未配置")
+        template = session.scalars(
+            select(SummaryTemplate).where(SummaryTemplate.is_active.is_(True), SummaryTemplate.is_default.is_(True))
+        ).first()
+        template_id = previous_context.get("template_id") or (template.id if template else None)
+        language = previous_context.get("language") or settings.get("default_language") or "zh"
+        reuse_transcript = bool(previous_context.get("reuse_transcript", True))
+        created = _create_media_job(session, video, "summarize", f"重试总结任务 {previous.id}", {
+            "language": language,
+            "template_id": template_id,
+            "reuse_transcript": reuse_transcript,
+            "retry_of": previous.id,
+        })
+        threading.Thread(
+            target=execute_summary_job,
+            args=(created.id, template_id, language, reuse_transcript),
+            daemon=True,
+        ).start()
+    else:
+        raise HTTPException(400, "下载任务缺少原始格式信息，请在下载面板重新下载")
+    return job_dict(created)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
 def cancel_job_compat(job_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     """兼容旧入口：与 DELETE /api/jobs/{id} 等价，同样要放掉 MOSS 推理锁。"""
-    job = get_owned_job(session, user, job_id)
-    if job.status not in {"completed", "failed", "cancelled"}:
-        _cancel_moss_transcription(moss_service_url(current_transcription()), (job.progress_json or {}).get("moss_job_id"))
-    job.status, job.current_stage = "cancelled", "cancelled"
-    session.commit(); return job_dict(job)
+    return cancel_job(job_id, user, session)
 
 
 @app.get("/api/jobs/{job_id}/events")
 def job_events(job_id: str, user: Any = Depends(get_current_user_flex), session: Session = Depends(db_session)):
     get_owned_job(session, user, job_id)
     def stream():
-        yield "event: status\ndata: {\"job_id\": \"%s\", \"status\": \"queued\", \"progress\": 0}\n\n" % job_id
+        last_payload = ""
+        while True:
+            with SessionLocal() as event_session:
+                current = event_session.get(ProcessingJob, job_id)
+                if current is None:
+                    yield f"event: error\ndata: {json.dumps({'detail': '任务不存在'}, ensure_ascii=False)}\n\n"
+                    return
+                payload = json.dumps(job_dict(current), ensure_ascii=False)
+                terminal = current.status in {"completed", "failed", "cancelled"}
+            if payload != last_payload:
+                yield f"event: status\ndata: {payload}\n\n"
+                last_payload = payload
+            else:
+                yield ": keep-alive\n\n"
+            if terminal:
+                return
+            time.sleep(1)
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
@@ -2153,18 +2656,17 @@ def delete_template(template_id: str, _: Any = Depends(require_admin), session: 
 @app.delete("/api/videos/{video_id}")
 def delete_video(video_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     video = get_owned_video(session, user, video_id)
+    active_job = session.scalars(
+        select(ProcessingJob).where(
+            ProcessingJob.video_asset_id == video_id,
+            ProcessingJob.status.in_(("queued", "running")),
+        ).limit(1)
+    ).first()
+    if active_job:
+        raise HTTPException(409, "处理任务仍在运行，请先取消或等待任务完成")
+    variants = list(session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video_id)).all())
     if (video.platform or video.source_platform) == "upload":
-        active_job = session.scalars(
-            select(ProcessingJob).where(
-                ProcessingJob.video_asset_id == video_id,
-                ProcessingJob.job_type == "transcribe",
-                ProcessingJob.status.in_(("queued", "running")),
-            ).limit(1)
-        ).first()
-        if active_job:
-            raise HTTPException(409, "转录任务仍在运行，请完成或失败后再删除上传文件")
         upload_root = UPLOAD_DIR.resolve()
-        variants = session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video_id)).all()
         for variant in variants:
             if not variant.local_path:
                 continue
@@ -2175,6 +2677,13 @@ def delete_video(video_id: str, user: Any = Depends(get_current_user), session: 
                 path.unlink(missing_ok=True)
             except OSError as exc:
                 raise HTTPException(500, "无法删除上传文件，请检查本地存储权限") from exc
+    for variant in variants:
+        for preview in PREVIEW_DIR.glob(f"{variant.id}.*"):
+            preview.unlink(missing_ok=True)
+    if video.thumbnail_path:
+        cover = Path(video.thumbnail_path).resolve()
+        if cover.is_relative_to(COVER_DIR.resolve()):
+            cover.unlink(missing_ok=True)
     session.delete(video); session.commit()
     return {"deleted": video_id}
 
@@ -2204,15 +2713,16 @@ def _as_naive_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo is not None else value
 
 
-def _has_active_job(session: Session, video_asset_id: str | None) -> bool:
+def _has_active_job(session: Session, video_asset_id: str | None, job_type: str | None = None) -> bool:
     if not video_asset_id:
         return False
-    return session.scalar(
-        select(ProcessingJob.id).where(
-            ProcessingJob.video_asset_id == video_asset_id,
-            ProcessingJob.status.in_(("running", "queued")),
-        ).limit(1)
-    ) is not None
+    query = select(ProcessingJob.id).where(
+        ProcessingJob.video_asset_id == video_asset_id,
+        ProcessingJob.status.in_(("running", "queued")),
+    )
+    if job_type:
+        query = query.where(ProcessingJob.job_type == job_type)
+    return session.scalar(query.limit(1)) is not None
 
 
 def _reconcile_meetings(session: Session, now: datetime, include_recording: bool) -> None:
@@ -2222,7 +2732,7 @@ def _reconcile_meetings(session: Session, now: datetime, include_recording: bool
     """
     from .meetings import finalize_live_meeting
 
-    statuses = ("recording", "processing") if include_recording else ("processing",)
+    statuses = ("recording", "processing", "summarizing") if include_recording else ("processing", "summarizing")
     stale = _stale_seconds()
     for meeting in session.scalars(select(Meeting).where(Meeting.status.in_(statuses))).all():
         if _has_active_job(session, meeting.video_asset_id):
@@ -2237,16 +2747,17 @@ def _reconcile_meetings(session: Session, now: datetime, include_recording: bool
             .limit(1)
         ).first()
         if job is not None and job.status in {"completed", "failed", "cancelled"}:
-            if job.status == "completed" and _latest_transcript(session, meeting.video_asset_id):
+            transcript = _latest_transcript(session, meeting.video_asset_id)
+            if job.status == "completed" and transcript:
                 meeting.status = "ready"
                 meeting.error_message = None
                 meeting.updated_at = now
                 continue
             if job.status in {"failed", "cancelled"}:
-                meeting.status = "failed"
-                meeting.error_message = (
-                    job.error_message or ("转录任务已取消" if job.status == "cancelled" else "终稿转录失败，请重试")
-                )
+                # 纪要失败不应让已经成功的终稿消失，也不能阻止用户再次生成纪要。
+                meeting.status = "ready" if job.job_type == "summarize" and transcript else "failed"
+                fallback = "纪要生成已取消" if job.job_type == "summarize" else "转录任务已取消"
+                meeting.error_message = job.error_message or fallback
                 meeting.updated_at = now
                 continue
         if meeting.audio_path and Path(meeting.audio_path).exists():
@@ -2306,6 +2817,18 @@ def _reconcile_on_startup() -> None:
         _reconcile_meetings(session, now, include_recording=True)
 
 
+def _cleanup_stale_temp_files() -> None:
+    settings = current_parser_settings()
+    retain_seconds = max(1, int(settings.get("temp_retain_hours") or 24)) * 3600
+    cutoff = time.time() - retain_seconds
+    for path in TEMP_DIR.iterdir():
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
 def _sweep_stale_meetings() -> None:
     interval = float(os.getenv("MEETING_SWEEP_SECONDS", "60") or 60)
     while True:
@@ -2321,6 +2844,7 @@ def _sweep_stale_meetings() -> None:
 def _start_state_guard() -> None:
     try:
         _reconcile_on_startup()
+        _cleanup_stale_temp_files()
     except Exception:
         traceback.print_exc()
     threading.Thread(target=_sweep_stale_meetings, daemon=True, name="meeting-sweeper").start()

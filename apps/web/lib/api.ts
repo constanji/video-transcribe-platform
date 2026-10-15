@@ -16,7 +16,12 @@ async function send(path: string, init?: RequestInit, withAuth = true): Promise<
     const token = getAccessToken();
     if (token) headers.set('Authorization', `Bearer ${token}`);
   }
-  return fetch(`${API}${path}`, { ...init, headers });
+  try {
+    return await fetch(`${API}${path}`, { ...init, headers });
+  } catch (error) {
+    if ((error as Error).name === 'AbortError') throw error;
+    throw new Error('无法连接 API 服务，请检查网络或确认本机服务正在运行');
+  }
 }
 
 async function parseError(response: Response): Promise<Error> {
@@ -25,6 +30,9 @@ async function parseError(response: Response): Promise<Error> {
     const body = await response.json();
     const detail = body.detail || body.error_message || body.message;
     if (typeof detail === 'string') message = detail;
+    else if (Array.isArray(detail)) {
+      message = detail.map((item) => item?.msg || String(item)).join('；');
+    }
   } catch {
     message = `${message}（${response.status}）`;
   }
@@ -56,10 +64,15 @@ export async function apiForm<T>(path: string, form: FormData): Promise<T> {
   return response.json();
 }
 
-export function uploadFile<T>(file: File, onProgress?: (percent: number) => void, signal?: AbortSignal): Promise<T> {
+export function uploadFileTo<T>(
+  path: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+  signal?: AbortSignal,
+): Promise<T> {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
-    request.open('POST', `${API}/api/uploads`);
+    request.open('POST', `${API}${path}`);
     request.responseType = 'json';
     const token = getAccessToken();
     if (token) request.setRequestHeader('Authorization', `Bearer ${token}`);
@@ -77,7 +90,7 @@ export function uploadFile<T>(file: File, onProgress?: (percent: number) => void
       // 401：刷新 token 后重发一次（FormData 已消费，需重建）。
       if (request.status === 401 && (await refreshOnce())) {
         const retry = new XMLHttpRequest();
-        retry.open('POST', `${API}/api/uploads`);
+        retry.open('POST', `${API}${path}`);
         retry.responseType = 'json';
         retry.setRequestHeader('Authorization', `Bearer ${getAccessToken()}`);
         retry.upload.onprogress = (event) => {
@@ -89,6 +102,11 @@ export function uploadFile<T>(file: File, onProgress?: (percent: number) => void
           else reject(new Error(retryPayload.detail || `上传失败（${retry.status}）`));
         };
         retry.onerror = () => reject(new Error('上传失败，请检查本机 API 是否运行'));
+        retry.onabort = () => reject(new Error('上传已取消'));
+        if (signal) {
+          if (signal.aborted) retry.abort();
+          else signal.addEventListener('abort', () => retry.abort(), { once: true });
+        }
         const retryBody = new FormData();
         retryBody.append('file', file);
         retry.send(retryBody);
@@ -104,6 +122,10 @@ export function uploadFile<T>(file: File, onProgress?: (percent: number) => void
     body.append('file', file);
     request.send(body);
   });
+}
+
+export function uploadFile<T>(file: File, onProgress?: (percent: number) => void, signal?: AbortSignal): Promise<T> {
+  return uploadFileTo<T>('/api/uploads', file, onProgress, signal);
 }
 
 /** 带认证的原始 Response（调用方自行处理 blob/文件名等），401 时刷新重放一次。 */
@@ -129,7 +151,7 @@ export async function downloadFile(url: string, filename: string): Promise<void>
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(objectUrl);
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
 }
 
 export function logoSrc(logo?: string | null) {

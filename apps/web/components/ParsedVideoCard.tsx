@@ -5,6 +5,7 @@ import { api, logoSrc } from '../lib/api';
 import { withToken } from '../lib/auth';
 import type { Job, MediaVariant, Platform, VideoAsset } from '../lib/types';
 import DownloadAction from './DownloadAction';
+import ImageGallery from './ImageGallery';
 import SummaryAction from './SummaryAction';
 import SummaryProgress from './SummaryProgress';
 
@@ -20,12 +21,9 @@ function formatDuration(seconds?: number | null) {
 }
 
 function latestJob(video: VideoAsset, type: 'transcribe' | 'summarize'): Job | null {
-  const stamp = video.last_processed_at;
-  return (video.jobs || []).find((item) => {
-    if (item.job_type !== type) return false;
-    if (!stamp) return true;
-    return item.created_at >= stamp;
-  }) || null;
+  return [...(video.jobs || [])]
+    .filter((item) => item.job_type === type)
+    .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0] || null;
 }
 
 function isRunning(job?: Job | null) {
@@ -53,6 +51,7 @@ export default function ParsedVideoCard({
   loading,
   initialPanel = null,
   meetingMode = false,
+  meetingId,
   preferredTemplateName,
   onReparse,
   onToast,
@@ -65,6 +64,7 @@ export default function ParsedVideoCard({
   loading: boolean;
   initialPanel?: 'download' | 'summary' | AnalyzePanel | null;
   meetingMode?: boolean;
+  meetingId?: string;
   preferredTemplateName?: string;
   onReparse: () => void;
   onToast: (message: string, kind?: 'success' | 'error') => void;
@@ -78,6 +78,7 @@ export default function ParsedVideoCard({
   const [hasTranscript, setHasTranscript] = useState(Boolean(video.has_transcript));
   const [hasSummary, setHasSummary] = useState(Boolean(video.has_summary));
   const [busy, setBusy] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [language, setLanguage] = useState('zh');
   const [mossReady, setMossReady] = useState(false);
   const [mossMessage, setMossMessage] = useState('正在检查转录服务…');
@@ -85,6 +86,10 @@ export default function ParsedVideoCard({
   const analyzeOpen = panel === 'transcribe' || panel === 'summarize';
   const transcribeRunning = isRunning(transcribeJob);
   const summarizeRunning = isRunning(summarizeJob);
+
+  useEffect(() => {
+    setPanel(normalizePanel(initialPanel));
+  }, [video.id, initialPanel]);
 
   useEffect(() => {
     setTranscribeJob(latestJob(video, 'transcribe'));
@@ -126,28 +131,6 @@ export default function ParsedVideoCard({
     }).catch(() => undefined);
   }, [panel, transcribeJob?.id, summarizeJob?.id]);
 
-  useEffect(() => {
-    const active = [transcribeJob, summarizeJob].filter((item) => isRunning(item)) as Job[];
-    if (!active.length) return;
-    const timer = window.setInterval(async () => {
-      try {
-        await Promise.all(active.map(async (item) => {
-          const next = await api<Job>(`/api/jobs/${item.id}`);
-          if (next.job_type === 'summarize') setSummarizeJob(next);
-          else setTranscribeJob(next);
-          if (['completed', 'failed', 'cancelled'].includes(next.status)) {
-            const fresh = await api<VideoAsset>(`/api/videos/${video.id}`);
-            setHasTranscript(hasUsableTranscript(fresh));
-            setHasSummary(hasUsableSummary(fresh));
-          }
-        }));
-      } catch {
-        window.clearInterval(timer);
-      }
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [transcribeJob?.id, transcribeJob?.status, summarizeJob?.id, summarizeJob?.status, video.id]);
-
   function changePanel(next: CardPanel) {
     setPanel(next);
     onPanelChange?.(next);
@@ -163,6 +146,10 @@ export default function ParsedVideoCard({
       return;
     }
     if (kind === 'summarize' && !templateId) return;
+    if (kind === 'summarize' && !hasTranscript && !mossReady) {
+      onToast(mossMessage || '转录服务尚未就绪', 'error');
+      return;
+    }
     setBusy(true);
     changePanel(kind);
     try {
@@ -181,6 +168,21 @@ export default function ParsedVideoCard({
     }
   }
 
+  async function cancel(job: Job | null) {
+    if (!job?.id || cancelling) return;
+    setCancelling(true);
+    try {
+      const updated = await api<Job>(`/api/jobs/${job.id}`, { method: 'DELETE' });
+      if (updated.job_type === 'summarize') setSummarizeJob(updated);
+      else setTranscribeJob(updated);
+      onToast('任务已取消');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setCancelling(false);
+    }
+  }
+
   const takeJob = useCallback((job: Job | null) => {
     if (!job) return;
     if (job.job_type === 'summarize') setSummarizeJob(job);
@@ -195,6 +197,21 @@ export default function ParsedVideoCard({
   const handleSummaryReady = useCallback((ready: boolean) => {
     setSummaryReady((current) => current === ready ? current : ready);
   }, []);
+
+  const images = variants.filter((item) => item.media_type === 'image');
+  const imageMode = !meetingMode && images.length > 0 && !variants.some((item) => item.media_type === 'video' || item.media_type === 'audio');
+  if (imageMode && video.id) {
+    return (
+      <ImageGallery
+        id={id}
+        video={video}
+        platform={platform}
+        images={images}
+        onReparse={() => { setTranscribeJob(null); setSummarizeJob(null); onReparse(); }}
+        onToast={onToast}
+      />
+    );
+  }
 
   if (loading) {
     return (
@@ -215,12 +232,16 @@ export default function ParsedVideoCard({
   const currentJob = panel === 'summarize' ? summarizeJob : transcribeJob;
   const transcribeDone = Boolean(hasTranscript || transcribeJob?.status === 'completed');
   const summaryDone = Boolean(hasSummary || summarizeJob?.status === 'completed');
-  const transcribeStart = !transcribeRunning && !transcribeDone;
-  const summaryStart = !summarizeRunning && !summaryDone;
+  const transcribeFailed = Boolean(transcribeJob && ['failed', 'cancelled'].includes(transcribeJob.status));
+  const summaryFailed = Boolean(summarizeJob && ['failed', 'cancelled'].includes(summarizeJob.status));
+  const transcribeStart = !transcribeRunning && (!transcribeDone || transcribeFailed);
+  const summaryStart = !summarizeRunning && (!summaryDone || summaryFailed);
   const blockedHint = transcribeRunning && panel === 'summarize'
     ? '转录进行中，完成后可开始总结'
     : summarizeRunning && panel === 'transcribe'
       ? '总结进行中，完成后可开始转录'
+      : panel === 'summarize' && !transcribeDone && !mossReady
+        ? mossMessage
       : panel === 'summarize' && !transcribeDone
         ? '还没有完成的转录，开始后会先转录再总结'
         : undefined;
@@ -240,6 +261,7 @@ export default function ParsedVideoCard({
           <div className="result-side-extra-inner">
             <SummaryAction
               videoId={video.id}
+              meetingId={meetingId}
               resetKey={video.last_processed_at || video.id}
               initialJob={currentJob}
               hasTranscript={hasTranscript}
@@ -311,21 +333,25 @@ export default function ParsedVideoCard({
               <label className="transcription-language">转录语言<select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="zh">中文</option><option value="auto">自动识别</option><option value="en">英语</option></select></label>
               <SummaryProgress
                 job={transcribeJob}
-                startLabel="开始转录"
+                startLabel={transcribeJob?.status === 'failed' || transcribeJob?.status === 'cancelled' ? '重新转录' : '开始转录'}
                 startHint={blockedHint || mossMessage}
                 showStart={transcribeStart}
                 startDisabled={busy || transcribeRunning || summarizeRunning || !mossReady}
                 onStart={() => start('transcribe')}
+                onCancel={() => cancel(transcribeJob)}
+                cancelDisabled={cancelling}
               />
             </div>
             <div className={`result-panel ${panel === 'summarize' ? 'is-active' : ''}`}>
               <SummaryProgress
                 job={summarizeJob}
-                startLabel="开始总结"
+                startLabel={summarizeJob?.status === 'failed' || summarizeJob?.status === 'cancelled' ? '重新总结' : '开始总结'}
                 startHint={blockedHint}
                 showStart={summaryStart}
-                startDisabled={busy || transcribeRunning || summarizeRunning}
+                startDisabled={busy || transcribeRunning || summarizeRunning || (!transcribeDone && !mossReady)}
                 onStart={() => start('summarize')}
+                onCancel={() => cancel(summarizeJob)}
+                cancelDisabled={cancelling}
               />
             </div>
           </div>

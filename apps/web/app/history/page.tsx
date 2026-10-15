@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import HistoryDetailPanel from '../../components/HistoryDetailPanel';
 import HistoryTimeline from '../../components/HistoryTimeline';
 import MeetingHistoryDetail from '../../components/MeetingHistoryDetail';
@@ -9,6 +9,7 @@ import Toast from '../../components/Toast';
 import TopBar from '../../components/TopBar';
 import { listMeetings } from '../../lib/meeting-api';
 import { api } from '../../lib/api';
+import { isImageRecord } from '../../lib/media-kind';
 import type { MeetingHistoryItem, Platform, Template, VideoAsset } from '../../lib/types';
 
 export default function HistoryPage() {
@@ -25,6 +26,7 @@ export default function HistoryPage() {
   const [jobType, setJobType] = useState('');
   const [status, setStatus] = useState('');
   const [view, setView] = useState<'all' | 'video' | 'summary'>('all');
+  const [media, setMedia] = useState<'all' | 'video' | 'image'>('all');
   const [toast, setToast] = useState('');
 
   async function load() {
@@ -62,20 +64,67 @@ export default function HistoryPage() {
 
   useEffect(() => {
     // ?tab=meeting 深链：hydration 完成后再切 tab，避免 SSR/客户端首帧不一致。
-    if (new URLSearchParams(window.location.search).get('tab') === 'meeting') setTab('meeting');
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('tab') === 'meeting') setTab('meeting');
+    if (params.get('media') === 'video' || params.get('media') === 'image') setMedia(params.get('media') as 'video' | 'image');
     api<Platform[]>('/api/platforms').then(setPlatforms).catch(() => []);
     api<Template[]>('/api/templates').then(setTemplates).catch(() => []);
     load().catch(() => setItems([]));
     loadMeetings();
   }, []);
 
+  useEffect(() => {
+    if (tab !== 'meeting') return;
+    const timer = window.setInterval(() => void loadMeetings(), 15000);
+    return () => window.clearInterval(timer);
+  }, [tab]);
+
+  const selectedJobRunning = Boolean(selected?.jobs?.some((job) => !['completed', 'failed', 'cancelled'].includes(job.status)));
+  useEffect(() => {
+    if (tab !== 'video' || !selected?.id || !selectedJobRunning) return;
+    const refresh = async () => {
+      try {
+        const detail = await api<VideoAsset>(`/api/history/${selected.id}`);
+        setSelected(detail);
+        setItems((current) => current.map((item) => item.id === detail.id ? { ...item, ...detail } : item));
+      } catch {
+        // 短暂断网时保留当前详情，下个轮询周期继续。
+      }
+    };
+    const timer = window.setInterval(refresh, 3000);
+    return () => window.clearInterval(timer);
+  }, [tab, selected?.id, selectedJobRunning]);
+
   const filtered = useMemo(() => {
     return items.filter((item) => {
       if (view === 'summary' && !item.has_summary) return false;
       if (view === 'video' && item.has_summary) return false;
+      if (media === 'image' && !isImageRecord(item)) return false;
+      if (media === 'video' && isImageRecord(item)) return false;
       return true;
     });
-  }, [items, view]);
+  }, [items, view, media]);
+
+  const mediaRef = useRef(media);
+  useEffect(() => {
+    if (tab !== 'video' || !items.length) return;
+    const changed = mediaRef.current !== media;
+    mediaRef.current = media;
+    const queryId = new URLSearchParams(window.location.search).get('video');
+    const linked = queryId ? filtered.find((item) => item.id === queryId) : undefined;
+    if (linked && selected?.id !== linked.id) {
+      void select(linked);
+      return;
+    }
+    if (selected && filtered.some((item) => item.id === selected.id)) return;
+    // 首次加载仍由 load() 按 URL 选中；只有切换类型后才改选中项。
+    if (!changed) return;
+    if (!filtered[0]) {
+      setSelected(undefined);
+      return;
+    }
+    void select(filtered[0]);
+  }, [media, filtered, selected, tab, items.length]);
 
   async function select(item: VideoAsset) {
     const detail = await api<VideoAsset>(`/api/history/${item.id}`);
@@ -120,10 +169,15 @@ export default function HistoryPage() {
               <option value="completed">完成</option>
               <option value="failed">失败</option>
             </select>
+            <div className="media-switch" role="tablist" aria-label="解析记录类型">
+              {([['all', '全部'], ['video', '视频'], ['image', '图片']] as const).map(([id, label]) => (
+                <button type="button" key={id} className={media === id ? 'active' : ''} onClick={() => setMedia(id)}>{label}</button>
+              ))}
+            </div>
             <div className="view-switch">
               {(['all', 'video', 'summary'] as const).map((id) => (
                 <button type="button" key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}>
-                  {id === 'all' ? '全部' : id === 'video' ? '视频' : '总结'}
+                  {id === 'all' ? '全部进度' : id === 'video' ? '未总结' : '已总结'}
                 </button>
               ))}
             </div>
@@ -135,7 +189,7 @@ export default function HistoryPage() {
       <div className="history-layout">
         <section className="timeline">
           {tab === 'video' ? (
-            <HistoryTimeline items={filtered} platforms={platforms} selectedId={selected?.id} onSelect={select} />
+            <HistoryTimeline items={filtered} platforms={platforms} selectedId={selected?.id} onSelect={select} emptyText={media === 'image' ? '还没有图片解析记录' : media === 'video' ? '还没有视频解析记录' : undefined} />
           ) : (
             <MeetingHistoryList
               items={meetings}
@@ -150,9 +204,26 @@ export default function HistoryPage() {
               video={selected}
               platforms={platforms}
               templates={templates}
-              onRetry={async (jobId) => { await api(`/api/jobs/${jobId}/retry`, { method: 'POST' }); setToast('已重新排队'); await load(); }}
+              onRefresh={() => void load()}
+              onRetry={async (jobId) => {
+                try {
+                  await api(`/api/jobs/${jobId}/retry`, { method: 'POST' });
+                  setToast('已重新排队');
+                  await load();
+                } catch (error) {
+                  setToast((error as Error).message);
+                }
+              }}
               onToast={(message) => setToast(message)}
-              onDeleted={async (id) => { await api(`/api/videos/${id}`, { method: 'DELETE' }); setToast('已删除'); await load(); }}
+              onDeleted={async (id) => {
+                try {
+                  await api(`/api/videos/${id}`, { method: 'DELETE' });
+                  setToast('已删除');
+                  await load();
+                } catch (error) {
+                  setToast((error as Error).message);
+                }
+              }}
             />
           ) : (
             <MeetingHistoryDetail

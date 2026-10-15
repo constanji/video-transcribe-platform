@@ -2,6 +2,7 @@
 
 import { logoSrc } from '../lib/api';
 import { withToken } from '../lib/auth';
+import { isImageRecord } from '../lib/media-kind';
 import type { Platform, VideoAsset } from '../lib/types';
 
 const TYPE_LABEL: Record<string, string> = { parse: '解析', download: '下载', transcribe: '转录', summarize: '总结' };
@@ -21,11 +22,13 @@ export default function HistoryTimeline({
   platforms,
   selectedId,
   onSelect,
+  emptyText,
 }: {
   items: VideoAsset[];
   platforms: Platform[];
   selectedId?: string;
   onSelect: (item: VideoAsset) => void;
+  emptyText?: string;
 }) {
   const groups = new Map<string, VideoAsset[]>();
   for (const item of items) {
@@ -36,8 +39,8 @@ export default function HistoryTimeline({
   if (items.length === 0) {
     return (
       <div className="empty-state">
-        还没有历史解析任务
-        <a href="/parse">去解析一个视频 →</a>
+        {emptyText || '还没有历史解析任务'}
+        <a href="/parse">去解析 →</a>
       </div>
     );
   }
@@ -50,6 +53,7 @@ export default function HistoryTimeline({
           {videos.map((item) => {
             const platform = platforms.find((p) => p.id === item.platform);
             const latest = item.jobs?.[0];
+            const image = isImageRecord(item);
             return (
               <button
                 type="button"
@@ -69,7 +73,7 @@ export default function HistoryTimeline({
                   </small>
                   <small>
                     {latest?.status || item.parse_status} · {new Date(item.last_processed_at || item.created_at).toLocaleTimeString('zh-CN', { hour12: false })}
-                    {item.has_summary ? ' · 总结已完成' : ' · 总结未完成'}
+                    {image ? ' · 图片' : item.has_summary ? ' · 总结已完成' : ' · 总结未完成'}
                   </small>
                 </div>
               </button>

@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { getMeeting } from '../lib/meeting-api';
+import { api } from '../lib/api';
+import { getMeeting, retryTranscribe } from '../lib/meeting-api';
 import type { MeetingRecord, Template } from '../lib/types';
 import SummaryViewer from './SummaryViewer';
 import TranscriptViewer from './TranscriptViewer';
@@ -38,6 +39,7 @@ export default function MeetingHistoryDetail({
   const [meeting, setMeeting] = useState<MeetingRecord>();
   const [tab, setTab] = useState<'summary' | 'transcript'>('summary');
   const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!meetingId) {
@@ -46,9 +48,28 @@ export default function MeetingHistoryDetail({
     }
     setMeeting(undefined);
     setError('');
-    getMeeting(meetingId)
-      .then((data) => setMeeting(data))
-      .catch(() => setError('会议详情加载失败'));
+    let cancelled = false;
+    const load = () => getMeeting(meetingId)
+      .then((data) => {
+        if (!cancelled) {
+          setMeeting(data);
+          setError('');
+        }
+        return data;
+      })
+      .catch(() => {
+        if (!cancelled) setError('会议详情加载失败');
+        return undefined;
+      });
+    void load();
+    const timer = window.setInterval(() => {
+      if (cancelled) return;
+      void load();
+    }, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [meetingId]);
 
   if (!meetingId) return <div className="empty-state">选择左侧会议查看详情</div>;
@@ -57,6 +78,40 @@ export default function MeetingHistoryDetail({
 
   const summary = meeting.summary ? [meeting.summary] : [];
   const transcript = meeting.transcript && meeting.transcript.text?.trim() ? meeting.transcript : undefined;
+
+  async function retryFinal() {
+    if (!meetingId || busy) return;
+    setBusy(true);
+    try {
+      setMeeting(await retryTranscribe(meetingId));
+      setTab('transcript');
+      onToast('已重新启动终稿转录');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function generateSummary() {
+    if (!meetingId || busy || !transcript) return;
+    const preferred = templates.find((item) => item.is_default)
+      || templates.find((item) => item.name === '标准会议纪要')
+      || templates[0];
+    setBusy(true);
+    try {
+      setMeeting(await api<MeetingRecord>(`/api/v1/meetings/${meetingId}/summaries`, {
+        method: 'POST',
+        body: JSON.stringify({ template_id: preferred?.id || null }),
+      }));
+      setTab('summary');
+      onToast('正在生成会议纪要');
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <>
@@ -73,6 +128,18 @@ export default function MeetingHistoryDetail({
             {` · ${new Date(meeting.created_at).toLocaleString('zh-CN', { hour12: false })}`}
           </p>
           {meeting.error_message && <p className="inline-error">{meeting.error_message}</p>}
+          <div className="detail-actions">
+            {(meeting.status === 'failed' || !transcript) && (
+              <button type="button" className="outline-button" disabled={busy || meeting.status === 'processing'} onClick={retryFinal}>
+                {meeting.status === 'processing' ? '转录中…' : '重试终稿转录'}
+              </button>
+            )}
+            {transcript && (
+              <button type="button" className="primary-button" disabled={busy || meeting.status === 'summarizing'} onClick={generateSummary}>
+                {meeting.status === 'summarizing' ? '纪要生成中…' : meeting.summary ? '重新生成纪要' : '生成纪要'}
+              </button>
+            )}
+          </div>
         </div>
       </div>
       <div className="detail-tabs">
@@ -80,7 +147,7 @@ export default function MeetingHistoryDetail({
         <button type="button" className={tab === 'transcript' ? 'active' : ''} onClick={() => setTab('transcript')}>转录</button>
       </div>
       {tab === 'summary' && (
-        <SummaryViewer summaries={summary} templates={templates} onRetry={() => onToast('请到会议工作台重新生成纪要')} onToast={onToast} />
+        <SummaryViewer summaries={summary} templates={templates} onRetry={generateSummary} onToast={onToast} />
       )}
       {tab === 'transcript' && <TranscriptViewer transcript={transcript} onToast={onToast} />}
     </>

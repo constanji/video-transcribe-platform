@@ -5,14 +5,20 @@ import { logoSrc } from '../lib/api';
 import type { Platform } from '../lib/types';
 
 const FEATURED = ['bilibili', 'douyin', 'kuaishou', 'weibo', 'xhs', 'youtube', 'tiktok', 'zhihu'];
+// 会议纪要和本地上传不是链接解析平台，只出现在历史记录里。
+const NOT_PARSE_PLATFORMS = new Set(['meeting', 'upload']);
 
 export default function PlatformLogoStrip({ platforms }: { platforms: Platform[] }) {
   const [expanded, setExpanded] = useState(false);
-  const featured = useMemo(
-    () => FEATURED.map((id) => platforms.find((item) => item.id === id)).filter(Boolean) as Platform[],
+  const parsePlatforms = useMemo(
+    () => platforms.filter((item) => !NOT_PARSE_PLATFORMS.has(item.id)),
     [platforms],
   );
-  const extra = platforms.filter((item) => !FEATURED.includes(item.id));
+  const featured = useMemo(
+    () => FEATURED.map((id) => parsePlatforms.find((item) => item.id === id)).filter(Boolean) as Platform[],
+    [parsePlatforms],
+  );
+  const extra = parsePlatforms.filter((item) => !FEATURED.includes(item.id));
   const visible = expanded ? [...featured, ...extra] : featured;
 
   return (

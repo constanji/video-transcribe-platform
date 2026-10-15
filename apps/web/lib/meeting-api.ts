@@ -1,4 +1,4 @@
-import { API, api, apiForm } from './api';
+import { API, api, uploadFileTo } from './api';
 import { getAccessToken } from './auth';
 import type { MeetingHistoryItem, MeetingRecord } from './types';
 
@@ -41,8 +41,17 @@ export function cancelJob(id: string) {
   return api<any>(`/api/jobs/${id}`, { method: 'DELETE' });
 }
 
-export function uploadMeetingAudio(id: string, file: File, transcribe = true) {
-  const body = new FormData();
-  body.append('file', file);
-  return apiForm<MeetingRecord>(`/api/v1/meetings/${id}/audio?transcribe=${transcribe ? 'true' : 'false'}`, body);
+export function uploadMeetingAudio(
+  id: string,
+  file: File,
+  transcribe = true,
+  onProgress?: (percent: number) => void,
+  signal?: AbortSignal,
+) {
+  return uploadFileTo<MeetingRecord>(
+    `/api/v1/meetings/${id}/audio?transcribe=${transcribe ? 'true' : 'false'}`,
+    file,
+    onProgress,
+    signal,
+  );
 }

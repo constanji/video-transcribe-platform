@@ -1,10 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { logoSrc } from '../lib/api';
 import { withToken } from '../lib/auth';
+import { isImageRecord } from '../lib/media-kind';
+import { writeWorkbenchDraft } from '../lib/workbench-draft';
 import type { Platform, Template, VideoAsset } from '../lib/types';
 import DownloadAction from './DownloadAction';
+import ImageGallery from './ImageGallery';
 import SummaryAction from './SummaryAction';
 import SummaryViewer from './SummaryViewer';
 import TranscriptViewer from './TranscriptViewer';
@@ -23,6 +26,7 @@ export default function HistoryDetailPanel({
   platforms,
   templates,
   onRetry,
+  onRefresh,
   onToast,
   onDeleted,
 }: {
@@ -30,6 +34,7 @@ export default function HistoryDetailPanel({
   platforms: Platform[];
   templates: Template[];
   onRetry: (jobId: string) => void;
+  onRefresh?: () => void;
   onToast: (message: string, kind?: 'success' | 'error') => void;
   onDeleted: (id: string) => void;
 }) {
@@ -37,8 +42,50 @@ export default function HistoryDetailPanel({
   const [confirm, setConfirm] = useState(false);
   const [showDownload, setShowDownload] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
+  useEffect(() => {
+    if (!confirm) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setConfirm(false);
+    };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [confirm]);
   if (!video) return <div className="empty-state">选择左侧任务查看详情</div>;
   const platform = platforms.find((item) => item.id === video.platform);
+  const confirmDialog = confirm && (
+    <div className="confirm-mask">
+      <div className="confirm-box" role="dialog" aria-modal="true" aria-labelledby="delete-record-title">
+        <h3 id="delete-record-title">删除这个解析记录？</h3>
+        <p>将同时删除其下载、转录和总结记录。此操作不可恢复。</p>
+        <div className="detail-actions">
+          <button type="button" className="primary-button" onClick={() => { onDeleted(video.id); setConfirm(false); }}>确认删除</button>
+          <button type="button" className="outline-button" onClick={() => setConfirm(false)}>取消</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  if (isImageRecord(video)) {
+    const images = (video.variants || []).filter((item) => item.media_type === 'image');
+    return (
+      <>
+        <ImageGallery
+          video={video}
+          platform={platform}
+          images={images}
+          onReparse={() => {
+            writeWorkbenchDraft({ url: video.source_url, videoId: video.id, panel: null });
+            window.location.href = '/parse';
+          }}
+          onToast={onToast}
+        />
+        <div className="detail-actions">
+          <button type="button" className="text-button" onClick={() => setConfirm(true)}>删除任务</button>
+        </div>
+        {confirmDialog}
+      </>
+    );
+  }
 
   return (
     <>
@@ -60,7 +107,17 @@ export default function HistoryDetailPanel({
         </div>
       </div>
       {showDownload && <DownloadAction video={video} variants={video.variants || []} onToast={onToast} />}
-      {showSummary && <SummaryAction videoId={video.id} hasTranscript={Boolean(video.has_transcript)} hasSummary={Boolean(video.has_summary)} onToast={onToast} />}
+      {showSummary && (
+        <SummaryAction
+          videoId={video.id}
+          hasTranscript={Boolean(video.has_transcript)}
+          hasSummary={Boolean(video.has_summary)}
+          onToast={onToast}
+          onJob={(job) => {
+            if (job && ['completed', 'failed', 'cancelled'].includes(job.status)) onRefresh?.();
+          }}
+        />
+      )}
       <div className="detail-tabs">
         <button type="button" className={tab === 'summary' ? 'active' : ''} onClick={() => setTab('summary')}>总结</button>
         <button type="button" className={tab === 'transcript' ? 'active' : ''} onClick={() => setTab('transcript')}>转录</button>
@@ -87,18 +144,7 @@ export default function HistoryDetailPanel({
           })}
         </ol>
       )}
-      {confirm && (
-        <div className="confirm-mask">
-          <div className="confirm-box">
-            <h3>删除这个视频资产？</h3>
-            <p>将同时删除其下载、转录和总结记录。此操作不可恢复。</p>
-            <div className="detail-actions">
-              <button type="button" className="primary-button" onClick={() => { onDeleted(video.id); setConfirm(false); }}>确认删除</button>
-              <button type="button" className="outline-button" onClick={() => setConfirm(false)}>取消</button>
-            </div>
-          </div>
-        </div>
-      )}
+      {confirmDialog}
     </>
   );
 }

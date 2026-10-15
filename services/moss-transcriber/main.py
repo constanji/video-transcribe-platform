@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import multiprocessing as mp
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -19,6 +21,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
@@ -36,6 +39,8 @@ SUMMARY_MODEL_PATH = Path(os.getenv(
     str(Path.home() / "Library/Application Support/com.meetily.ai/models/summary/Qwen3.5-4B-Q4_K_M.gguf"),
 ))
 LLAMA_CLI = os.getenv("LLAMA_CLI", "llama-cli")
+MOSS_MEDIA_ROOT = Path(os.getenv("MOSS_MEDIA_ROOT", os.getenv("STORAGE_ROOT", str(Path.cwd() / "storage")))).resolve()
+MOSS_MAX_SOURCE_BYTES = max(1, int(os.getenv("MOSS_MAX_SOURCE_MB", "512"))) * 1024 * 1024
 
 
 def _llama_cli_available() -> bool:
@@ -50,12 +55,6 @@ def _llama_cli_available() -> bool:
 jobs: dict[str, dict[str, Any]] = {}
 _model = None
 _device_cache: str | None = None
-# 好处：① 任务可以被真正 kill 取消（原来没有任何取消手段，孤儿推理会一直占着推理锁）
-#      ② worker 崩了不会拖垮 HTTP 服务，且模型只需要常驻一份。
-# worker_parent/child 之间用 Pipe 通信。
-_worker: dict[str, Any] = {"proc": None, "conn": None}
-_worker_lock = threading.Lock()
-_worker_state: dict[str, Any] = {"loaded": False, "loading": False, "error": None}
 # 推理全部放在一个常驻 worker 子进程：父进程只对外提供 HTTP，模型只常驻一份。
 # 好处：① 长任务可被真正 kill 取消（原来没有任何取消手段，孤儿推理会一直占着推理锁）
 #      ② worker 崩溃/OOM 不会拖垮 HTTP 服务，下次请求自动拉起。
@@ -125,8 +124,11 @@ def _chunk_seconds() -> float:
 
 
 def _chunk_workers() -> int:
-    """切片并行推理的线程数。1 = 走原来的整段推理（说话人标签最连贯）。"""
-    return max(1, _env_int("MOSS_CHUNK_WORKERS", 4))
+    """默认串行：单个 FunASR/torch 模型实例不保证多线程 generate 安全。
+
+    部署者确认运行时支持后仍可显式调高，但会议场景优先保证说话人一致与稳定性。
+    """
+    return max(1, _env_int("MOSS_CHUNK_WORKERS", 1))
 
 
 def _chunk_cache_dir() -> Path:
@@ -395,6 +397,7 @@ class TranscriptionRequest(BaseModel):
     output_format: str = "json"
     duration_seconds: float | None = None
     referer: str | None = None
+    max_source_bytes: int | None = None
     # 切片并行参数：不传就用环境变量 MOSS_CHUNK_SECONDS / MOSS_CHUNK_WORKERS。
     chunk_seconds: float | None = None
     chunk_workers: int | None = None
@@ -402,6 +405,7 @@ class TranscriptionRequest(BaseModel):
 
 class SummaryRequest(BaseModel):
     text: str
+    prompt: str | None = None
     title: str | None = None
     template_name: str | None = None
     sections: list[dict[str, Any]] = []
@@ -780,7 +784,33 @@ def _heartbeat(job: dict[str, Any], stop: threading.Event, start: int, end: int,
         )
 
 
-def _download_url(url: str, referer: str | None, job: dict[str, Any]) -> tuple[str, str]:
+def _validate_public_url(url: str) -> str:
+    parsed = urlparse(str(url).strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(400, "媒体地址必须是有效的 HTTP(S) URL")
+    try:
+        addresses = {
+            item[4][0].split("%", 1)[0]
+            for item in socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+        }
+    except OSError as exc:
+        raise HTTPException(400, "媒体地址域名无法解析") from exc
+    if not addresses:
+        raise HTTPException(400, "媒体地址域名没有可用地址")
+    if any(not ipaddress.ip_address(value).is_global for value in addresses):
+        raise HTTPException(400, "拒绝下载本机、内网或保留网络地址")
+    return parsed.geturl()
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_public_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _download_url(url: str, referer: str | None, job: dict[str, Any], max_bytes: int = MOSS_MAX_SOURCE_BYTES) -> tuple[str, str]:
+    url = _validate_public_url(url)
+    max_bytes = max(1, min(int(max_bytes or MOSS_MAX_SOURCE_BYTES), MOSS_MAX_SOURCE_BYTES))
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -802,25 +832,36 @@ def _download_url(url: str, referer: str | None, job: dict[str, Any]) -> tuple[s
     handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
     handle.close()
     request = urllib.request.Request(url, headers=headers)
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
     _touch(job, stage="downloading", progress=6, message="正在下载媒体")
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with opener.open(request, timeout=120) as response:
             total = int(response.headers.get("Content-Length") or 0)
+            if total > max_bytes:
+                raise HTTPException(413, f"媒体文件超过 {max_bytes // (1024 * 1024)} MB 限制")
             received = 0
             with open(handle.name, "wb") as output:
                 while True:
+                    _check_cancelled(job)
                     chunk = response.read(1024 * 256)
                     if not chunk:
                         break
-                    output.write(chunk)
                     received += len(chunk)
+                    if received > max_bytes:
+                        raise HTTPException(413, f"媒体文件超过 {max_bytes // (1024 * 1024)} MB 限制")
+                    output.write(chunk)
                     if total:
                         ratio = min(1.0, received / total)
                         _touch(job, stage="downloading", progress=6 + int(16 * ratio), message=f"正在下载媒体 {int(ratio * 100)}%")
                     else:
                         _touch(job, stage="downloading", progress=12, message=f"正在下载媒体 {received // (1024 * 1024)} MB")
-    except urllib.error.URLError as exc:
-        os.unlink(handle.name)
+    except InferCancelled:
+        Path(handle.name).unlink(missing_ok=True)
+        raise
+    except (urllib.error.URLError, HTTPException, OSError) as exc:
+        Path(handle.name).unlink(missing_ok=True)
+        if isinstance(exc, HTTPException):
+            raise
         raise HTTPException(400, f"下载媒体失败：{exc}") from exc
     if not Path(handle.name).stat().st_size:
         os.unlink(handle.name)
@@ -848,7 +889,11 @@ def _to_wav(source: Path, job: dict[str, Any] | None = None) -> tuple[str, str |
         "ffmpeg", "-y", "-i", str(source),
         "-ac", "1", "-ar", "16000", "-f", "wav", handle.name,
     ]
-    completed = subprocess.run(command, capture_output=True, text=True)
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired as exc:
+        Path(handle.name).unlink(missing_ok=True)
+        raise HTTPException(408, "音频转码超时") from exc
     if completed.returncode != 0:
         os.unlink(handle.name)
         raise HTTPException(400, completed.stderr.strip() or "音频转码失败")
@@ -864,18 +909,27 @@ def _audio_seconds(wav_path: str, fallback: float | None = None) -> float | None
         return fallback
 
 
-def _resolve_media(request: TranscriptionRequest, job: dict[str, Any]) -> tuple[str, list[str]]:
+def _resolve_media(request: TranscriptionRequest, job: dict[str, Any], trusted_media_path: bool = False) -> tuple[str, list[str]]:
     cleanup: list[str] = []
     if request.media_path:
-        path = Path(request.media_path).expanduser()
+        path = Path(request.media_path).expanduser().resolve()
+        if not trusted_media_path and not path.is_relative_to(MOSS_MEDIA_ROOT):
+            raise HTTPException(400, "媒体文件不在允许的共享目录内")
         if not path.is_file():
             raise HTTPException(400, "找不到音频文件")
+        if path.stat().st_size > MOSS_MAX_SOURCE_BYTES:
+            raise HTTPException(413, f"媒体文件超过 {MOSS_MAX_SOURCE_BYTES // (1024 * 1024)} MB 限制")
         wav, temp = _to_wav(path, job)
         if temp:
             cleanup.append(temp)
         return wav, cleanup
     if request.media_url:
-        downloaded, temp = _download_url(request.media_url, request.referer, job)
+        downloaded, temp = _download_url(
+            request.media_url,
+            request.referer,
+            job,
+            max_bytes=request.max_source_bytes or MOSS_MAX_SOURCE_BYTES,
+        )
         cleanup.append(temp)
         wav, converted = _to_wav(Path(downloaded), job)
         if converted:
@@ -884,8 +938,13 @@ def _resolve_media(request: TranscriptionRequest, job: dict[str, Any]) -> tuple[
     raise HTTPException(400, "需要提供 media_path 或 media_url")
 
 
-def _transcribe(request: TranscriptionRequest, job: dict[str, Any], fail_fast: bool = False) -> dict[str, Any]:
-    wav_path, cleanup = _resolve_media(request, job)
+def _transcribe(
+    request: TranscriptionRequest,
+    job: dict[str, Any],
+    fail_fast: bool = False,
+    trusted_media_path: bool = False,
+) -> dict[str, Any]:
+    wav_path, cleanup = _resolve_media(request, job, trusted_media_path=trusted_media_path)
     _check_cancelled(job)  # 转码期间可能已经被取消，别再往下跑
     stop = threading.Event()
     beater: threading.Thread | None = None
@@ -1060,6 +1119,8 @@ def load():
 
 
 def _summary_prompt(request: SummaryRequest) -> str:
+    if request.prompt and request.prompt.strip():
+        return request.prompt.strip()
     sections = request.sections or [{"title": "摘要", "instruction": "概括视频的主要内容和结论。"}]
     lines = [
         "你是视频总结助手。根据转写用简体中文输出 Markdown，不要解释写作过程。",
@@ -1076,7 +1137,7 @@ def _summary_prompt(request: SummaryRequest) -> str:
             lines.append(instruction)
         if fmt == "list":
             lines.append("请用项目符号列表。")
-    lines.extend(["", "转写文本：", request.text[:14000]])
+    lines.extend(["", "转写文本：", request.text])
     return "\n".join(lines)
 
 
@@ -1148,7 +1209,7 @@ def _clean_summary(raw: str, section_titles: list[str] | None = None) -> str:
 
 @app.post("/v1/summaries")
 def summarize(request: SummaryRequest):
-    if not request.text.strip():
+    if not request.text.strip() and not (request.prompt and request.prompt.strip()):
         raise HTTPException(400, "转写文本为空")
     if not SUMMARY_MODEL_PATH.is_file():
         raise HTTPException(503, f"未找到总结模型文件：{SUMMARY_MODEL_PATH}")
@@ -1230,6 +1291,7 @@ def transcribe_sync(request: SyncTranscriptionRequest):
             TranscriptionRequest(media_path=media_path, language=request.language or "zh"),
             job,
             fail_fast=True,
+            trusted_media_path=bool(request.pcm16),
         )
         offset = float(request.offset_ms or 0)
         for segment in result.get("segments") or []:

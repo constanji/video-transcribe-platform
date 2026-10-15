@@ -71,6 +71,8 @@ services:
       SUMMARY_MODEL_PATH: /models/summary/Qwen3.5-4B-Q4_K_M.gguf
       LLAMA_CLI: /usr/local/bin/llama-cli
       MOSS_PRELOAD: ${MOSS_PRELOAD:-1}
+      MOSS_MEDIA_ROOT: /data
+      MOSS_MAX_SOURCE_MB: ${MOSS_MAX_SOURCE_MB:-512}
       # Chunk-result disk cache: a failed/cancelled job resumes from finished
       # chunks instead of re-inferring the whole recording.
       MOSS_CACHE_DIR: /cache

@@ -5,6 +5,7 @@ import HistoryDetailPanel from '../../../components/HistoryDetailPanel';
 import Toast from '../../../components/Toast';
 import TopBar from '../../../components/TopBar';
 import { api } from '../../../lib/api';
+import { isImageRecord } from '../../../lib/media-kind';
 import type { Platform, Template, VideoAsset } from '../../../lib/types';
 
 export default function VideoDetailPage({ params }: { params: { id: string } }) {
@@ -24,8 +25,8 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
       <TopBar active="history" />
       <div className="page-heading">
         <div>
-          <span className="eyebrow">VIDEO</span>
-          <h1>视频详情</h1>
+          <span className="eyebrow">{video && isImageRecord(video) ? 'IMAGE' : 'VIDEO'}</span>
+          <h1>{video && isImageRecord(video) ? '图片详情' : '视频详情'}</h1>
           <p><a href="/history">返回历史解析任务</a></p>
         </div>
       </div>
