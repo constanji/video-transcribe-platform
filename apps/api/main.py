@@ -4,6 +4,7 @@ import copy
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -22,7 +23,7 @@ from urllib.parse import quote
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -2668,8 +2669,21 @@ def delete_template(template_id: str, _: Any = Depends(require_admin), session: 
     return {"deleted": template_id}
 
 
+def _purge_video_files(upload_paths: list[str], preview_paths: list[Path], cover: Path | None) -> None:
+    """后台清理媒体文件：DB 记录已先行删除，文件删失败只记日志不阻塞响应。"""
+    for raw in upload_paths:
+        try:
+            Path(raw).unlink(missing_ok=True)
+        except OSError as exc:
+            logging.getLogger(__name__).warning("删除上传文件失败 %s: %s", raw, exc)
+    for preview in preview_paths:
+        preview.unlink(missing_ok=True)
+    if cover is not None:
+        cover.unlink(missing_ok=True)
+
+
 @app.delete("/api/videos/{video_id}")
-def delete_video(video_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+def delete_video(video_id: str, background_tasks: BackgroundTasks, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     video = get_owned_video(session, user, video_id)
     active_job = session.scalars(
         select(ProcessingJob).where(
@@ -2680,6 +2694,7 @@ def delete_video(video_id: str, user: Any = Depends(get_current_user), session: 
     if active_job:
         raise HTTPException(409, "处理任务仍在运行，请先取消或等待任务完成")
     variants = list(session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video_id)).all())
+    upload_paths: list[str] = []
     if (video.platform or video.source_platform) == "upload":
         upload_root = UPLOAD_DIR.resolve()
         for variant in variants:
@@ -2688,17 +2703,15 @@ def delete_video(video_id: str, user: Any = Depends(get_current_user), session: 
             path = Path(variant.local_path).resolve()
             if not path.is_relative_to(upload_root):
                 raise HTTPException(500, "拒绝删除受管上传目录以外的文件")
-            try:
-                path.unlink(missing_ok=True)
-            except OSError as exc:
-                raise HTTPException(500, "无法删除上传文件，请检查本地存储权限") from exc
-    for variant in variants:
-        for preview in PREVIEW_DIR.glob(f"{variant.id}.*"):
-            preview.unlink(missing_ok=True)
+            upload_paths.append(str(path))
+    previews = [preview for variant in variants for preview in PREVIEW_DIR.glob(f"{variant.id}.*")]
+    cover: Path | None = None
     if video.thumbnail_path:
-        cover = Path(video.thumbnail_path).resolve()
-        if cover.is_relative_to(COVER_DIR.resolve()):
-            cover.unlink(missing_ok=True)
+        candidate = Path(video.thumbnail_path).resolve()
+        if candidate.is_relative_to(COVER_DIR.resolve()):
+            cover = candidate
+    # 文件清理放后台：大文件 unlink 是删除接口慢的主因，DB 记录先删、立即返回。
+    background_tasks.add_task(_purge_video_files, upload_paths, previews, cover)
     session.delete(video); session.commit()
     return {"deleted": video_id}
 

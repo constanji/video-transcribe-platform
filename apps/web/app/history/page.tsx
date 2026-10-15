@@ -28,6 +28,7 @@ export default function HistoryPage() {
   const [view, setView] = useState<'all' | 'video' | 'summary'>('all');
   const [media, setMedia] = useState<'all' | 'video' | 'image'>('all');
   const [meetingQuery, setMeetingQuery] = useState('');
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [toast, setToast] = useState('');
 
   async function load() {
@@ -208,7 +209,7 @@ export default function HistoryPage() {
       <div className="history-layout">
         <section className="timeline">
           {tab === 'video' ? (
-            <HistoryTimeline items={filtered} platforms={platforms} selectedId={selected?.id} onSelect={select} emptyText={media === 'image' ? '还没有图片解析记录' : media === 'video' ? '还没有视频解析记录' : undefined} />
+            <HistoryTimeline items={filtered} platforms={platforms} selectedId={selected?.id} deletingId={deletingId} onSelect={select} emptyText={media === 'image' ? '还没有图片解析记录' : media === 'video' ? '还没有视频解析记录' : undefined} />
           ) : (
             <MeetingHistoryList
               items={meetings}
@@ -223,6 +224,7 @@ export default function HistoryPage() {
               video={selected}
               platforms={platforms}
               templates={templates}
+              deleting={deletingId === selected?.id}
               onRefresh={() => void load()}
               onRetry={async (jobId) => {
                 try {
@@ -235,12 +237,15 @@ export default function HistoryPage() {
               }}
               onToast={(message) => setToast(message)}
               onDeleted={async (id) => {
+                setDeletingId(id);
                 try {
                   await api(`/api/videos/${id}`, { method: 'DELETE' });
                   setToast('已删除');
                   await load();
                 } catch (error) {
                   setToast((error as Error).message);
+                } finally {
+                  setDeletingId(null);
                 }
               }}
             />

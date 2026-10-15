@@ -25,6 +25,7 @@ export default function HistoryDetailPanel({
   video,
   platforms,
   templates,
+  deleting,
   onRetry,
   onRefresh,
   onToast,
@@ -33,6 +34,7 @@ export default function HistoryDetailPanel({
   video?: VideoAsset;
   platforms: Platform[];
   templates: Template[];
+  deleting?: boolean;
   onRetry: (jobId: string) => void;
   onRefresh?: () => void;
   onToast: (message: string, kind?: 'success' | 'error') => void;
@@ -40,16 +42,24 @@ export default function HistoryDetailPanel({
 }) {
   const [tab, setTab] = useState<'summary' | 'transcript' | 'timeline'>('summary');
   const [confirm, setConfirm] = useState(false);
+  const [awaitingDelete, setAwaitingDelete] = useState(false);
   const [showDownload, setShowDownload] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
   useEffect(() => {
     if (!confirm) return;
     const close = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setConfirm(false);
+      if (event.key === 'Escape' && !deleting && !awaitingDelete) setConfirm(false);
     };
     window.addEventListener('keydown', close);
     return () => window.removeEventListener('keydown', close);
-  }, [confirm]);
+  }, [confirm, deleting, awaitingDelete]);
+  useEffect(() => {
+    // 点过确认后，删除结束（成功或失败）都关掉确认框；结果由 toast 反馈。
+    if (awaitingDelete && !deleting) {
+      setAwaitingDelete(false);
+      setConfirm(false);
+    }
+  }, [awaitingDelete, deleting]);
   if (!video) return <div className="empty-state">选择左侧任务查看详情</div>;
   const platform = platforms.find((item) => item.id === video.platform);
   const confirmDialog = confirm && (
@@ -58,7 +68,9 @@ export default function HistoryDetailPanel({
         <h3 id="delete-record-title">删除这个解析记录？</h3>
         <p>将同时删除其下载、转录和总结记录。此操作不可恢复。</p>
         <div className="detail-actions">
-          <button type="button" className="primary-button" onClick={() => { onDeleted(video.id); setConfirm(false); }}>确认删除</button>
+          <button type="button" className="primary-button" disabled={deleting || awaitingDelete} onClick={() => { setAwaitingDelete(true); onDeleted(video.id); }}>
+            {deleting || awaitingDelete ? <><i className="badge-dot" />删除中…</> : '确认删除'}
+          </button>
           <button type="button" className="outline-button" onClick={() => setConfirm(false)}>取消</button>
         </div>
       </div>

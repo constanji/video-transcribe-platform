@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Header,
@@ -703,8 +704,20 @@ def retry_transcribe(meeting_id: str, request: Request, session: Session = Depen
     return payload
 
 
+def _purge_meeting_files(local_paths: list[str], folder: Path) -> None:
+    """后台清理会议媒体文件与目录：DB 记录已先行删除，失败不阻塞响应。"""
+    import logging
+
+    for raw in local_paths:
+        try:
+            Path(raw).unlink(missing_ok=True)
+        except OSError as exc:
+            logging.getLogger(__name__).warning("删除会议媒体文件失败 %s: %s", raw, exc)
+    shutil.rmtree(folder, ignore_errors=True)
+
+
 @router.delete("/api/v1/meetings/{meeting_id}")
-def delete_meeting(meeting_id: str, request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
+def delete_meeting(meeting_id: str, request: Request, background_tasks: BackgroundTasks, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
     """删除会议及其绑定的视频资产（转录/纪要/媒体文件同属这场会议）。"""
     from .main import MEETING_DIR, MediaVariant, ProcessingJob, Summary, Transcript, VideoAsset, _has_active_job
 
@@ -712,6 +725,7 @@ def delete_meeting(meeting_id: str, request: Request, session: Session = Depends
     if _has_active_job(session, meeting.video_asset_id):
         raise HTTPException(409, "转录任务仍在运行，请完成或取消后再删除")
     video = session.get(VideoAsset, meeting.video_asset_id) if meeting.video_asset_id else None
+    pending_paths: list[str] = []
     if video is not None:
         video_id = video.id
         session.query(ProcessingJob).filter(ProcessingJob.video_asset_id == video_id).delete(synchronize_session=False)
@@ -719,12 +733,12 @@ def delete_meeting(meeting_id: str, request: Request, session: Session = Depends
         session.query(Summary).filter(Summary.video_asset_id == video_id).delete(synchronize_session=False)
         for variant in session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == video_id)).all():
             if variant.local_path:
-                Path(variant.local_path).unlink(missing_ok=True)
+                pending_paths.append(variant.local_path)
             session.delete(variant)
         session.delete(video)
     folder = MEETING_DIR / meeting.id
-    if folder.exists():
-        shutil.rmtree(folder, ignore_errors=True)
+    # 文件清理放后台：大音频/纪要目录 rmtree 是删除慢的主因，DB 记录先删、立即返回。
+    background_tasks.add_task(_purge_meeting_files, pending_paths, folder)
     session.delete(meeting)
     session.commit()
     return {"deleted": meeting_id}

@@ -36,12 +36,14 @@ export default function HistoryTimeline({
   items,
   platforms,
   selectedId,
+  deletingId,
   onSelect,
   emptyText,
 }: {
   items: VideoAsset[];
   platforms: Platform[];
   selectedId?: string;
+  deletingId?: string | null;
   onSelect: (item: VideoAsset) => void;
   emptyText?: string;
 }) {
@@ -72,8 +74,10 @@ export default function HistoryTimeline({
             return (
               <button
                 type="button"
-                className={`timeline-item ${selectedId === item.id ? 'selected' : ''}`}
+                className={`timeline-item ${selectedId === item.id ? 'selected' : ''} ${deletingId === item.id ? 'deleting' : ''}`}
                 key={item.id}
+                aria-busy={deletingId === item.id || undefined}
+                disabled={deletingId === item.id}
                 onClick={() => onSelect(item)}
               >
                 <span className="timeline-dot" />
@@ -87,17 +91,23 @@ export default function HistoryTimeline({
                     {platform?.name || item.platform || '未知平台'} · {TYPE_LABEL[latest?.job_type || 'parse'] || '解析'}
                   </small>
                   <div className="history-tags">
-                    {(() => {
-                      const raw = latest?.status || item.parse_status;
-                      const info = (latest ? JOB_STATUS : PARSE_STATUS)[raw] || { label: raw || '—', kind: '' };
-                      return <em className={`history-tag ${info.kind}`}>{info.label}</em>;
-                    })()}
-                    <em className="history-tag time">
-                      {new Date(item.last_processed_at || item.created_at).toLocaleTimeString('zh-CN', { hour12: false })}
-                    </em>
-                    {image
-                      ? <em className="history-tag">图片</em>
-                      : <em className={`history-tag ${item.has_summary ? 'flag-on' : 'flag-off'}`}>{item.has_summary ? '已总结' : '未总结'}</em>}
+                    {deletingId === item.id ? (
+                      <em className="history-tag busy"><i className="badge-dot" />删除中…</em>
+                    ) : (
+                      <>
+                        {(() => {
+                          const raw = latest?.status || item.parse_status;
+                          const info = (latest ? JOB_STATUS : PARSE_STATUS)[raw] || { label: raw || '—', kind: '' };
+                          return <em className={`history-tag ${info.kind}`}>{info.label}</em>;
+                        })()}
+                        <em className="history-tag time">
+                          {new Date(item.last_processed_at || item.created_at).toLocaleTimeString('zh-CN', { hour12: false })}
+                        </em>
+                        {image
+                          ? <em className="history-tag">图片</em>
+                          : <em className={`history-tag ${item.has_summary ? 'flag-on' : 'flag-off'}`}>{item.has_summary ? '已总结' : '未总结'}</em>}
+                      </>
+                    )}
                   </div>
                 </div>
               </button>
