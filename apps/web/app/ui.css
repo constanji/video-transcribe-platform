@@ -363,3 +363,6 @@ a.recent-card{text-decoration:none;color:inherit;display:block}
 .cookie-badge.cookie-ok{background:#e8f6ee;color:#1d7a46;border:1px solid #cde9d9}
 .cookie-badge.cookie-weak{background:#fff4e5;color:#a05c00;border:1px solid #f5ddb8}
 .cookie-badge.cookie-missing{background:#f1f3f6;color:#8b95a3;border:1px solid #e3e7ec}
+/* 封面裁切统一：结果卡与最近解析栅格同用 3:2 视口，居中裁切，内容完全对齐 */
+.recent-cover{height:auto;aspect-ratio:3/2}
+.recent-cover img,.result-cover img,.history-thumb img,.detail-cover img{object-position:center}
