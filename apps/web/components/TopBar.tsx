@@ -62,7 +62,7 @@ export default function TopBar({ active }: { active: 'meeting' | 'parse' | 'hist
       </a>
       <nav className="nav-tabs">
         <a className={active === 'meeting' ? 'active' : ''} href="/">会议纪要</a>
-        <a className={active === 'parse' ? 'active' : ''} href="/parse">视频解析</a>
+        <a className={active === 'parse' ? 'active' : ''} href="/parse">通用解析</a>
         <a className={active === 'history' ? 'active' : ''} href="/history">历史解析任务</a>
         <a className={active === 'settings' ? 'active' : ''} href="/settings">设置</a>
       </nav>

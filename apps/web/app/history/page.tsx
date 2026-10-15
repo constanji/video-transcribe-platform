@@ -149,14 +149,14 @@ export default function HistoryPage() {
         <div>
           <span className="eyebrow">HISTORY</span>
           <h1>历史任务</h1>
-          <p>按时间查看视频解析与会议纪要任务。</p>
+          <p>按时间查看通用解析与会议纪要任务。</p>
         </div>
       </div>
       <div className="history-filters">
         <div className="view-switch">
           {(['video', 'meeting'] as const).map((id) => (
             <button type="button" key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>
-              {id === 'video' ? '视频解析' : '会议纪要'}
+              {id === 'video' ? '通用解析' : '会议纪要'}
             </button>
           ))}
         </div>
