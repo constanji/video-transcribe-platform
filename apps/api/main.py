@@ -643,17 +643,30 @@ def safe_filename(title: str, ext: str) -> str:
     return f"{cleaned[:80].rstrip('.')}.{ext.lstrip('.')}"
 
 
+def cookie_status(parser_id: str, cookies: str) -> str:
+    """静态检测 Cookie 健康度：missing=缺失 / weak=疑似游客或关键字段缺失 / ok=已有。"""
+    if not cookies:
+        return "missing"
+    if parser_id == "youtube":
+        names = {part.strip().split("=", 1)[0] for part in cookies.split(";") if "=" in part}
+        if "LOGIN_INFO" in names and "SAPISID" in names:
+            return "ok"
+        return "weak"
+    return "ok"
+
+
 def mask_settings(group: str, data: dict[str, Any]) -> dict[str, Any]:
     payload = copy.deepcopy(data)
     if group == "transcription":
         secret = payload.get("api_key") or ""
         payload["api_key"] = ""
         payload["api_key_masked"] = f"{secret[:3]}****{secret[-2:]}" if len(secret) > 5 else ("已配置" if secret else "")
-    for parser in (payload.get("parsers") or {}).values():
+    for parser_id, parser in (payload.get("parsers") or {}).items():
         cookies = parser.get("cookies") or ""
         if cookies:
             parser["cookies"] = ""
             parser["cookies_masked"] = "已保存"
+        parser["cookie_status"] = cookie_status(parser_id, cookies)
     return payload
 
 
@@ -2537,6 +2550,8 @@ def config_endpoint(key: str, session: Session, payload: dict[str, Any] | None =
                 previous = (current.get("parsers") or {}).get(parser_id) or {}
                 if item.get("cookies") in (None, ""):
                     item["cookies"] = previous.get("cookies") or ""
+                item.pop("cookies_masked", None)
+                item.pop("cookie_status", None)
             next_value["parsers"] = parsers
             next_value, _ = transform_parser_cookies(next_value, encrypt=True)
         if record is None:

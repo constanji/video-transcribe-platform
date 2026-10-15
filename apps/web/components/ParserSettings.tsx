@@ -36,9 +36,28 @@ function parserDefault(id: string) {
     use_proxy: ['youtube', 'tiktok', 'twitter'].includes(id),
     cookies: '',
     cookies_masked: '',
+    cookie_status: 'missing',
     video_quality: id === 'bilibili' ? '_720P' : '',
   };
 }
+
+/** 与后端 cookie_status 同规则的前端镜像：编辑时实时反映健康度。 */
+function localCookieStatus(id: string, cookies: string): 'missing' | 'weak' | 'ok' {
+  if (!cookies.trim()) return 'missing';
+  if (id === 'youtube') {
+    const names = new Set(
+      cookies.split(';').map((part) => part.trim().split('=')[0]).filter(Boolean),
+    );
+    return names.has('LOGIN_INFO') && names.has('SAPISID') ? 'ok' : 'weak';
+  }
+  return 'ok';
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  ok: '已有 Cookie',
+  weak: 'Cookie 疑似无效',
+  missing: 'Cookie 缺失',
+};
 
 export default function ParserSettings({
   value,
@@ -100,10 +119,15 @@ export default function ParserSettings({
       <h3 className="subheading">解析器列表</h3>
       {ADAPTERS.map((adapter) => {
         const item = { ...parserDefault(adapter.id), ...(data.parsers[adapter.id] || {}) };
+        const editing = item.cookies.trim().length > 0;
+        const status = editing ? localCookieStatus(adapter.id, item.cookies) : (item.cookie_status || 'missing');
         return (
           <details className="adapter-block" key={adapter.id}>
             <summary>
               <span className="adapter-name">{adapter.name}</span>
+              <span className={`cookie-badge cookie-${status}`} title={STATUS_LABEL[status] || ''}>
+                {STATUS_LABEL[status] || 'Cookie 缺失'}
+              </span>
               <label className="adapter-enable" onClick={(e) => e.stopPropagation()}>
                 启用
                 <input type="checkbox" checked={item.enable} onChange={(e) => patchParser(adapter.id, { enable: e.target.checked })} />
@@ -139,7 +163,10 @@ export default function ParserSettings({
               {adapter.id === 'youtube' && (
                 <div className="shipinhao-guide">
                   <strong>使用 yt-dlp，不经过 Metube</strong>
-                  <p>本机未部署 Metube。稳定解析需要在上方填写 YouTube Cookie。</p>
+                  <p>
+                    稳定解析必须使用<b>登录态</b> Cookie（需同时包含 LOGIN_INFO 和 SAPISID）。
+                    游客 Cookie 或缺关键字段会显示「Cookie 疑似无效」，解析会被 YouTube 反爬拦截。
+                  </p>
                 </div>
               )}
               {adapter.id === 'bilibili' && (
