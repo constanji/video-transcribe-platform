@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import ipaddress
+import os
 import socket
 from dataclasses import dataclass, field
 from html import unescape
@@ -51,6 +52,12 @@ class ParseError(Exception):
     pass
 
 
+# 198.18.0.0/15 (RFC 2544) 是 Clash/Mihomo 等代理 Fake-IP 模式的默认段：本地
+# 开发机开着代理时所有域名都解析成这段地址，真实出口由代理决定。把它豁免，
+# 真正的内网段（127/10/172.16/192.168/169.254 等）仍然严格拒绝。
+FAKE_IP_NET = ipaddress.ip_network("198.18.0.0/15")
+
+
 def host_matches(host: str, domain: str) -> bool:
     normalized_host = host.rstrip(".").lower()
     normalized_domain = domain.rstrip(".").lower()
@@ -59,6 +66,8 @@ def host_matches(host: str, domain: str) -> bool:
 
 def validate_public_http_url(url: str) -> str:
     """拒绝会让服务端访问本机、内网或元数据地址的 URL。"""
+    if os.environ.get("PARSE_SSRF_GUARD", "").lower() in {"off", "0", "false"}:
+        return urlparse(str(url).strip()).geturl()
     parsed = urlparse(str(url).strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ParseError("仅支持有效的 HTTP(S) 链接")
@@ -76,6 +85,8 @@ def validate_public_http_url(url: str) -> str:
             address = ipaddress.ip_address(value)
         except ValueError as exc:
             raise ParseError("链接域名解析结果无效") from exc
+        if address in FAKE_IP_NET:
+            continue
         if not address.is_global:
             raise ParseError("拒绝访问本机、内网或保留网络地址")
     return parsed.geturl()
