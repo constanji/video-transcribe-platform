@@ -366,3 +366,9 @@ a.recent-card{text-decoration:none;color:inherit;display:block}
 /* 封面裁切统一：结果卡与最近解析栅格同用 3:2 视口，居中裁切，内容完全对齐 */
 .recent-cover{height:auto;aspect-ratio:3/2}
 .recent-cover img,.result-cover img,.history-thumb img,.detail-cover img{object-position:center}
+/* 最近的解析：切换 全部/视频/图片 时内容滑动过渡 */
+@keyframes recent-slide-next{from{opacity:0;transform:translateX(26px)}to{opacity:1;transform:none}}
+@keyframes recent-slide-prev{from{opacity:0;transform:translateX(-26px)}to{opacity:1;transform:none}}
+.recent-swap{animation:recent-slide-next .26s cubic-bezier(.33,.8,.4,1)}
+.recent-swap[data-dir=prev]{animation-name:recent-slide-prev}
+@media(prefers-reduced-motion:reduce){.recent-swap{animation:none}}

@@ -8,6 +8,8 @@ import type { Platform, VideoAsset } from '../lib/types';
 
 type MediaFilter = 'all' | 'video' | 'image';
 
+const MEDIA_ORDER: MediaFilter[] = ['all', 'video', 'image'];
+
 function timeLabel(value?: string | null) {
   if (!value) return '尚未处理';
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
@@ -29,21 +31,30 @@ export default function RecentVideoGrid({
   onDelete: (video: VideoAsset) => void;
 }) {
   const [media, setMedia] = useState<MediaFilter>('all');
-  const [scoped, setScoped] = useState<{ media: MediaFilter; items: VideoAsset[] } | null>(null);
+  const [slideDir, setSlideDir] = useState<'next' | 'prev'>('next');
+  // 按类型缓存结果（stale-while-revalidate）：切换时先显示旧内容，后台刷新，避免闪烁
+  const [scopedCache, setScopedCache] = useState<{ sig: VideoAsset[]; items: Partial<Record<MediaFilter, VideoAsset[]>> }>({ sig: [], items: {} });
 
   useEffect(() => {
     if (media === 'all') return;
+    if (scopedCache.sig === videos && scopedCache.items[media]) return;
     let active = true;
     api<VideoAsset[]>(`/api/videos/recent?media=${media}`).then((data) => {
-      if (active) setScoped({ media, items: data });
+      if (active) setScopedCache((prev) => ({ sig: videos, items: { ...prev.items, [media]: data } }));
     }).catch(() => {
-      if (active) setScoped({ media, items: [] });
+      if (active) setScopedCache((prev) => ({ sig: videos, items: { ...prev.items, [media]: [] } }));
     });
     return () => { active = false; };
-  }, [media, videos]);
+  }, [media, videos, scopedCache]);
 
-  const shown = media === 'all' ? videos : scoped?.media === media ? scoped.items : null;
+  const shown = media === 'all' ? videos : scopedCache.items[media] ?? null;
   const historyHref = media === 'all' ? '/history' : `/history?media=${media}`;
+
+  const switchMedia = (next: MediaFilter) => {
+    if (next === media) return;
+    setSlideDir(MEDIA_ORDER.indexOf(next) > MEDIA_ORDER.indexOf(media) ? 'next' : 'prev');
+    setMedia(next);
+  };
 
   return (
     <section className="library-panel recent-panel">
@@ -51,14 +62,15 @@ export default function RecentVideoGrid({
         <h2>最近的解析</h2>
         <div className="media-switch" role="tablist" aria-label="解析记录类型">
           {([['all', '全部'], ['video', '视频'], ['image', '图片']] as const).map(([id, label]) => (
-            <button type="button" key={id} className={media === id ? 'active' : ''} onClick={() => setMedia(id)}>{label}</button>
+            <button type="button" key={id} className={media === id ? 'active' : ''} onClick={() => switchMedia(id)}>{label}</button>
           ))}
         </div>
         <a className="recent-all-link" href={historyHref}>查看全部 <span aria-hidden="true">→</span></a>
       </div>
-      {shown === null ? (
-        <div className="empty-library"><strong>正在加载</strong></div>
-      ) : shown.length === 0 ? (
+      <div className="recent-swap" key={media} data-dir={slideDir}>
+        {shown === null ? (
+          <div className="empty-library"><strong>正在加载</strong></div>
+        ) : shown.length === 0 ? (
         <div className="empty-library">
           <span>▣</span>
           <strong>{media === 'image' ? '还没有图片解析记录' : media === 'video' ? '还没有视频解析记录' : '还没有解析记录'}</strong>
@@ -113,6 +125,7 @@ export default function RecentVideoGrid({
           })}
         </div>
       )}
+      </div>
     </section>
   );
 }
