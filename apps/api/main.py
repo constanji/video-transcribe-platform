@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from .parser_runtime import ParseError, bili_play_url, cover_referer, download_bytes, download_to_path, parse_media
+from .parsers.ugoira import compose_ugoira
 from .auth import get_current_user, get_current_user_flex, require_admin
 from .templates_loader import HOME_DEFAULT_NAMES, find_builtin_template, load_builtin_templates, template_sort_key
 from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Text, create_engine, func, or_, select, text
@@ -214,6 +215,7 @@ class MediaVariant(Base):
     local_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_size: Mapped[int | None] = mapped_column(nullable=True)
     download_status: Mapped[str] = mapped_column(String(32), default="available")
+    extra_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class ConfigRecord(Base):
@@ -308,6 +310,9 @@ with engine.begin() as conn:
             conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN input_media_type VARCHAR(16)"))
         if "fallback_used" not in job_cols:
             conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN fallback_used BOOLEAN DEFAULT 0"))
+        variant_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(media_variants)")).fetchall()}
+        if "extra_json" not in variant_cols:
+            conn.execute(text("ALTER TABLE media_variants ADD COLUMN extra_json JSON"))
         for owner_table in ("video_assets", "meetings", "api_keys"):
             owner_cols = {row[1] for row in conn.execute(text(f"PRAGMA table_info({owner_table})")).fetchall()}
             if "user_id" not in owner_cols:
@@ -324,6 +329,7 @@ with engine.begin() as conn:
             "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS fallback_used BOOLEAN DEFAULT FALSE",
             "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS logs_json JSONB",
             "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS progress_json JSONB",
+            "ALTER TABLE media_variants ADD COLUMN IF NOT EXISTS extra_json JSONB",
             "ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS source_platform VARCHAR(80)",
             "ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS available_formats JSONB",
             "ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS latest_summary_id VARCHAR(36)",
@@ -955,6 +961,7 @@ def parse(request: ParseRequest, user: Any = Depends(get_current_user), session:
         variant.media_type = item.media_type
         variant.source_url = item.source_url
         variant.file_size = item.file_size or variant.file_size
+        variant.extra_json = dict(item.extra) if item.extra else None
         variant.download_status = "downloaded" if variant.local_path else "available"
         session.add(variant)
     for stale_items in existing_variants.values():
@@ -1460,20 +1467,32 @@ def download_variant(video_id: str, variant_id: str, user: Any = Depends(get_cur
         variant.download_status = "failed"
         session.commit()
         raise
+    # Pixiv 动图：帧包 zip 自动合成为 GIF（有 ffmpeg 时优先 MP4），失败则回退原始 zip。
+    output_path, output_ext = path, (variant.format or "mp4")
+    if (variant.media_type or "") == "file" and (variant.format or "").lower() == "zip" and (video.platform or video.source_platform) == "pixiv":
+        frames = ((variant.extra_json or {}).get("frames")) or []
+        try:
+            composed, ext = compose_ugoira(path, frames, TEMP_DIR)
+            output_path, output_ext = composed, ext
+            if temporary:
+                path.unlink(missing_ok=True)
+                temporary = False  # 原始 zip 已删；合成产物由下方 BackgroundTask 清理
+        except Exception as exc:
+            logger.warning("Pixiv 动图合成失败，回退原始帧包: %s", exc)
     job.status = "completed"
     job.current_stage = "completed"
     job.finished_at = datetime.now(timezone.utc)
     job.progress = 1
     variant.download_status = "downloaded"
-    variant.file_size = path.stat().st_size
+    variant.file_size = output_path.stat().st_size
     session.commit()
-    filename = safe_filename(video.title, variant.format or "mp4")
-    media_type = IMAGE_MEDIA_TYPES.get((variant.format or "").lower(), "video/mp4" if variant.format == "mp4" else "application/octet-stream")
+    filename = safe_filename(video.title, output_ext)
+    media_type = IMAGE_MEDIA_TYPES.get(output_ext.lower(), "video/mp4" if output_ext == "mp4" else "application/octet-stream")
     return FileResponse(
-        path,
+        output_path,
         filename=filename,
         media_type=media_type,
-        background=BackgroundTask(path.unlink, missing_ok=True) if temporary else None,
+        background=BackgroundTask(output_path.unlink, missing_ok=True) if (temporary or output_path != path) else None,
     )
 
 

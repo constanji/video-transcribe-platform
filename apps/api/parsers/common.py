@@ -103,6 +103,7 @@ class MediaItem:
     media_type: str
     source_url: str
     file_size: int | None = None
+    extra: dict | None = None  # 平台专属附加信息（如 Pixiv ugoira 帧延迟表）
 
 
 @dataclass

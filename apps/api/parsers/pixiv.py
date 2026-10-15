@@ -27,9 +27,18 @@ def parse_pixiv(client: httpx.Client, url: str, cookies: str) -> ParsedMedia:
         meta = _body(client, f"https://www.pixiv.net/ajax/illust/{pid}/ugoira_meta", headers, allow_error=True)
         original = ((meta or {}).get("originalSrc")) if isinstance(meta, dict) else None
         if original:
-            variants.append(video_item(str(original), "动图"))
+            variants.append(video_item(str(original), "动图（自动合成 GIF）"))
             variants[-1].format = "zip"
             variants[-1].media_type = "file"
+            frames = (meta or {}).get("frames")
+            if isinstance(frames, list) and frames:
+                cleaned = [
+                    {"file": str(item.get("file")), "delay": int(item.get("delay") or 100)}
+                    for item in frames
+                    if isinstance(item, dict) and item.get("file")
+                ]
+                if cleaned:
+                    variants[-1].extra = {"frames": cleaned}
     if not variants:
         pages = _body(client, f"https://www.pixiv.net/ajax/illust/{pid}/pages", headers)
         if isinstance(pages, list):
