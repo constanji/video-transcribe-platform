@@ -20,6 +20,9 @@ def parse_kuaishou(client: httpx.Client, url: str) -> ParsedMedia:
         raise ParseError(f"快手页面请求失败（{response.status_code}）")
     matched = INIT_STATE_RE.search(response.text)
     if not matched:
+        path = str(response.url).split("?", 1)[0].rstrip("/")
+        if path in ("https://www.kuaishou.com", "https://m.kuaishou.com") or path.endswith(("/new-reco", "/photo-reco", "/search", "/hot", "/profile")):
+            raise ParseError("贴的是快手首页/推荐流链接，请打开具体视频后复制分享链接（v.kuaishou.com/xxx 或 www.kuaishou.com/short-video/xxx）")
         raise ParseError("快手页面未返回视频数据，链接可能已失效")
     try:
         state = json.loads(matched.group(1).strip().replace("undefined", "null"))
