@@ -102,20 +102,13 @@ Flow B — build locally, upload the images, load them:
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push/PR:
+GitHub Actions is turned off. `.github/workflows/ci.yml` has been removed, so pushes and pull requests no longer run checks.
 
-| job | checks |
-|---|---|
-| `api` | dependencies install, `compileall`, import smoke test asserting the OpenAPI paths (including `/api/v1/meetings` and `/api/uploads`) |
-| `web` | `npm ci`, `tsc --noEmit`, `next build` |
-| `deployment` | `bash -n` on every script, `docker compose config -q`, and a guard that fails if payloads, secrets or files over 5 MB are ever tracked |
-
-Two traps worth remembering:
+Two traps worth remembering if checks are restored later:
 
 * `pip install .` fails in this repo — the flat layout has several top-level
   directories, so setuptools auto-discovery aborts. The Docker build only works because
-  it copies `pyproject.toml` into an empty directory first. CI installs the dependency
-  list from `pyproject.toml` instead.
+  it copies `pyproject.toml` into an empty directory first.
 * Assert on `app.openapi()["paths"]`, not `app.routes`: FastAPI wraps an included router
   in a single `_IncludedRouter` entry, so `apps/api/meetings.py` routes never appear in
   `app.routes` individually.
