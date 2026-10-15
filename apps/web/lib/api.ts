@@ -39,29 +39,44 @@ async function parseError(response: Response): Promise<Error> {
   return new Error(message);
 }
 
+/** 连接层面失败（含响应体读取中断）统一转成可读文案；AbortError 原样抛出让调用方识别取消。 */
+function wrapNetworkError(error: unknown): Error {
+  if (error instanceof DOMException && error.name === 'AbortError') throw error;
+  if (error instanceof TypeError) throw new Error('无法连接 API 服务，请检查网络或确认本机服务正在运行');
+  throw error;
+}
+
 /** 统一请求：自动带 Bearer；401 时单飞刷新并重放一次，仍失败抛错。 */
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  let response = await send(path, init);
+  let response = await send(path, init).catch(wrapNetworkError);
   if (response.status === 401 && !isAuthPath(path)) {
     if (await refreshOnce()) {
-      response = await send(path, init);
+      response = await send(path, init).catch(wrapNetworkError);
     }
   }
   if (!response.ok) throw await parseError(response);
   if (response.status === 204) return undefined as T;
-  return response.json();
+  try {
+    return await response.json();
+  } catch (error) {
+    return wrapNetworkError(error) as T;
+  }
 }
 
 /** FormData 上传（不设 Content-Type，交给浏览器带 boundary），同样支持 401 刷新重放。 */
 export async function apiForm<T>(path: string, form: FormData): Promise<T> {
-  let response = await send(path, { method: 'POST', body: form });
+  let response = await send(path, { method: 'POST', body: form }).catch(wrapNetworkError);
   if (response.status === 401 && !isAuthPath(path)) {
     if (await refreshOnce()) {
-      response = await send(path, { method: 'POST', body: form });
+      response = await send(path, { method: 'POST', body: form }).catch(wrapNetworkError);
     }
   }
   if (!response.ok) throw await parseError(response);
-  return response.json();
+  try {
+    return await response.json();
+  } catch (error) {
+    return wrapNetworkError(error) as T;
+  }
 }
 
 export function uploadFileTo<T>(
