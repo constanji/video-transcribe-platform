@@ -211,6 +211,7 @@ export default function ParsedVideoCard({
         images={images}
         onReparse={() => { setTranscribeJob(null); setSummarizeJob(null); onReparse(); }}
         onToast={onToast}
+        onClose={onClose}
       />
     );
   }

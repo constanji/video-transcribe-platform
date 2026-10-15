@@ -31,6 +31,7 @@ export default function ImageGallery({
   images,
   onReparse,
   onToast,
+  onClose,
 }: {
   id?: string;
   video: VideoAsset;
@@ -38,6 +39,7 @@ export default function ImageGallery({
   images: MediaVariant[];
   onReparse: () => void;
   onToast: (message: string, kind?: 'success' | 'error') => void;
+  onClose?: () => void;
 }) {
   const [index, setIndex] = useState(0);
   const [picked, setPicked] = useState<string[]>(() => images.map((item) => item.id));
@@ -115,6 +117,7 @@ export default function ImageGallery({
         <div className="result-top-right">
           <span className="status-text parsed">解析完成</span>
           <button type="button" className="text-button" onClick={onReparse}>重新解析</button>
+          {onClose && <button type="button" className="result-close" aria-label="关闭操作台" title="关闭" onClick={onClose}>×</button>}
         </div>
       </div>
       <h2>{video.title || '未命名图片'}</h2>
