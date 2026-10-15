@@ -392,3 +392,7 @@ a.recent-card{text-decoration:none;color:inherit;display:block}
 .detail-title .detail-title-edit{opacity:.55}
 .detail-title .detail-title-edit:hover,.detail-title:hover .detail-title-edit{opacity:1}
 .detail-title-input{font-size:20px;font-weight:700;max-width:480px}
+/* 解析操作台关闭按钮 */
+.result-card{position:relative}
+.result-close{width:26px;height:26px;flex:none;border:1px solid var(--line);border-radius:50%;background:#fff;color:#8b95a3;font-size:15px;line-height:1;cursor:pointer;display:grid;place-items:center;transition:color .12s,border-color .12s,background .12s}
+.result-close:hover{color:#b04343;border-color:#e8baba;background:#fff7f7}

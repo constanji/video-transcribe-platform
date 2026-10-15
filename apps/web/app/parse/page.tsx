@@ -300,6 +300,15 @@ export default function ParsePage() {
             setActionPanel(panel);
             writeWorkbenchDraft({ panel });
           }}
+          onClose={() => {
+            parseController.current?.abort();
+            setLoading(false);
+            setVideo(null);
+            setVariants([]);
+            setActionPanel(null);
+            writeWorkbenchDraft({ videoId: '', panel: null });
+            document.querySelector('.intro')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }}
         />
       )}
       <RecentVideoGrid

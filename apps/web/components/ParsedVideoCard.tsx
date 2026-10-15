@@ -56,6 +56,7 @@ export default function ParsedVideoCard({
   onReparse,
   onToast,
   onPanelChange,
+  onClose,
 }: {
   video: VideoAsset;
   platforms: Platform[];
@@ -69,6 +70,7 @@ export default function ParsedVideoCard({
   onReparse: () => void;
   onToast: (message: string, kind?: 'success' | 'error') => void;
   onPanelChange?: (panel: 'download' | 'summary' | AnalyzePanel | null) => void;
+  onClose?: () => void;
 }) {
   const [panel, setPanel] = useState<CardPanel>(normalizePanel(initialPanel));
   const [transcribeJob, setTranscribeJob] = useState<Job | null>(latestJob(video, 'transcribe'));
@@ -216,6 +218,7 @@ export default function ParsedVideoCard({
   if (loading) {
     return (
       <section className="result-card skeleton-card" aria-busy="true">
+        {onClose && <button type="button" className="result-close" aria-label="关闭操作台" title="关闭" onClick={onClose}>×</button>}
         <div className="result-side">
           <div className="result-cover skeleton" />
         </div>
@@ -287,6 +290,7 @@ export default function ParsedVideoCard({
           <div className="result-top-right">
             <span className={`status-text ${video.parse_status}`}>{video.parse_status === 'uploaded' ? '文件已就绪' : video.parse_status === 'parsed' ? '解析完成' : '等待解析器接入'}</span>
             {video.parse_status !== 'uploaded' && <button type="button" className="text-button" onClick={() => { setTranscribeJob(null); setSummarizeJob(null); onReparse(); }}>重新解析</button>}
+            {onClose && <button type="button" className="result-close" aria-label="关闭操作台" title="关闭" onClick={onClose}>×</button>}
           </div>
         </div>
         <h2>{video.title || '待获取视频标题'}</h2>
