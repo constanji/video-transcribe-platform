@@ -78,19 +78,19 @@ export default function MeetingHistoryList({
                 <span>◈</span>
               </div>
               <div className="history-main">
-                <strong>{item.title}</strong>
-                <small>
+                <strong className="history-title">{item.title}</strong>
+                <small className="history-meta">
                   会议纪要 · {MODE_LABEL[item.mode] || item.mode}
                   {formatDuration(item.duration_seconds) ? ` · ${formatDuration(item.duration_seconds)}` : ''}
                 </small>
-                <small className={item.status === 'processing' || item.status === 'summarizing' ? 'history-status busy' : 'history-status'}>
-                  {(item.status === 'processing' || item.status === 'summarizing') && <i className="badge-dot" />}
-                  {STATUS_LABEL[item.status] || item.status}
-                </small>
-                <small className="history-flags">
-                  <em className={item.has_transcript ? 'flag-on' : 'flag-off'}>{item.has_transcript ? '已转录' : '未转录'}</em>
-                  <em className={item.has_summary ? 'flag-on' : 'flag-off'}>{item.has_summary ? '纪要已完成' : '纪要未完成'}</em>
-                </small>
+                <div className="history-tags">
+                  <em className={`history-tag ${item.status === 'processing' || item.status === 'summarizing' ? 'busy' : item.status === 'ready' ? 'ok' : item.status === 'failed' ? 'err' : ''}`}>
+                    {(item.status === 'processing' || item.status === 'summarizing') && <i className="badge-dot" />}
+                    {STATUS_LABEL[item.status] || item.status}
+                  </em>
+                  <em className={`history-tag ${item.has_transcript ? 'flag-on' : 'flag-off'}`}>{item.has_transcript ? '已转录' : '未转录'}</em>
+                  <em className={`history-tag ${item.has_summary ? 'flag-on' : 'flag-off'}`}>{item.has_summary ? '纪要完成' : '纪要未完成'}</em>
+                </div>
               </div>
             </button>
           ))}

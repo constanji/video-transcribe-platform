@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { getMeeting, retryTranscribe } from '../lib/meeting-api';
+import { getMeeting, renameMeeting, retryTranscribe } from '../lib/meeting-api';
 import type { MeetingRecord, Template } from '../lib/types';
 import SummaryViewer from './SummaryViewer';
 import TranscriptViewer from './TranscriptViewer';
@@ -31,15 +31,20 @@ export default function MeetingHistoryDetail({
   meetingId,
   templates,
   onToast,
+  onRenamed,
 }: {
   meetingId?: string;
   templates: Template[];
   onToast: (message: string, kind?: 'success' | 'error') => void;
+  onRenamed?: (id: string, title: string) => void;
 }) {
   const [meeting, setMeeting] = useState<MeetingRecord>();
   const [tab, setTab] = useState<'summary' | 'transcript'>('summary');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
+  const [savingTitle, setSavingTitle] = useState(false);
 
   useEffect(() => {
     if (!meetingId) {
@@ -48,6 +53,7 @@ export default function MeetingHistoryDetail({
     }
     setMeeting(undefined);
     setError('');
+    setEditingTitle(false);
     let cancelled = false;
     const load = () => getMeeting(meetingId)
       .then((data) => {
@@ -113,6 +119,27 @@ export default function MeetingHistoryDetail({
     }
   }
 
+  async function saveTitle() {
+    const title = titleDraft.trim();
+    if (!meeting || savingTitle) return;
+    if (!title || title === meeting.title) {
+      setEditingTitle(false);
+      return;
+    }
+    setSavingTitle(true);
+    try {
+      const updated = await renameMeeting(meeting.id, title);
+      setMeeting(updated);
+      onRenamed?.(updated.id, updated.title);
+      onToast('已重命名');
+      setEditingTitle(false);
+    } catch (err) {
+      onToast((err as Error).message, 'error');
+    } finally {
+      setSavingTitle(false);
+    }
+  }
+
   return (
     <>
       <div className="detail-hero">
@@ -121,7 +148,35 @@ export default function MeetingHistoryDetail({
         </div>
         <div>
           <span className="platform-badge">会议纪要</span>
-          <h2>{meeting.title}</h2>
+          {editingTitle ? (
+            <input
+              className="meeting-title-input detail-title-input"
+              autoFocus
+              value={titleDraft}
+              disabled={savingTitle}
+              onChange={(event) => setTitleDraft(event.target.value)}
+              onBlur={saveTitle}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void saveTitle();
+                if (event.key === 'Escape') setEditingTitle(false);
+              }}
+              aria-label="会议名称"
+            />
+          ) : (
+            <h2 className="detail-title">
+              {meeting.title}
+              <button
+                type="button"
+                className="title-edit-btn detail-title-edit"
+                aria-label={`重命名会议「${meeting.title}」`}
+                title="重命名"
+                onClick={() => {
+                  setTitleDraft(meeting.title);
+                  setEditingTitle(true);
+                }}
+              >✎</button>
+            </h2>
+          )}
           <p>
             {STATUS_LABEL[meeting.status] || meeting.status}
             {formatDuration(meeting.video?.duration_seconds) ? ` · ${formatDuration(meeting.video?.duration_seconds)}` : ''}

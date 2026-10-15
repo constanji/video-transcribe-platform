@@ -27,7 +27,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import String, cast, or_, select
 from sqlalchemy.orm import Session
 
 router = APIRouter()
@@ -511,10 +511,26 @@ def create_meeting(payload: CreateMeetingRequest, request: Request, session: Ses
 
 
 @router.get("/api/v1/meetings")
-def list_meetings(request: Request, session: Session = Depends(get_db), auth=Depends(meeting_auth)):
-    from .main import Meeting, Summary, VideoAsset, _latest_transcript
+def list_meetings(request: Request, q: str = "", session: Session = Depends(get_db), auth=Depends(meeting_auth)):
+    from .main import Meeting, Summary, Transcript, VideoAsset, _latest_transcript
 
-    meetings = session.scalars(select(Meeting).where(*_meeting_scope(session, auth)).order_by(Meeting.updated_at.desc())).all()
+    scope = _meeting_scope(session, auth)
+    # 检索：标题 / 转录正文 / 纪要正文（含实时分段），任一命中即返回。
+    keyword = (q or "").strip()
+    if keyword:
+        like = f"%{keyword}%"
+        transcript_hit = select(Transcript.video_asset_id).where(Transcript.text.ilike(like))
+        summary_hit = select(Summary.video_asset_id).where(Summary.content_markdown.ilike(like))
+        scope = [
+            *scope,
+            or_(
+                Meeting.title.ilike(like),
+                Meeting.video_asset_id.in_(transcript_hit),
+                Meeting.video_asset_id.in_(summary_hit),
+                cast(Meeting.live_segments_json, String).ilike(like),
+            ),
+        ]
+    meetings = session.scalars(select(Meeting).where(*scope).order_by(Meeting.updated_at.desc())).all()
     items: list[dict[str, Any]] = []
     for meeting in meetings:
         video = session.get(VideoAsset, meeting.video_asset_id) if meeting.video_asset_id else None

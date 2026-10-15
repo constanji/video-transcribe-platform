@@ -27,6 +27,7 @@ export default function HistoryPage() {
   const [status, setStatus] = useState('');
   const [view, setView] = useState<'all' | 'video' | 'summary'>('all');
   const [media, setMedia] = useState<'all' | 'video' | 'image'>('all');
+  const [meetingQuery, setMeetingQuery] = useState('');
   const [toast, setToast] = useState('');
 
   async function load() {
@@ -47,8 +48,8 @@ export default function HistoryPage() {
     }
   }
 
-  async function loadMeetings() {
-    const data = await listMeetings().catch(() => []);
+  async function loadMeetings(query = '') {
+    const data = await listMeetings(query).catch(() => []);
     setMeetings(data);
     if (data.length > 0) {
       // 支持 /history?tab=meeting&meeting=<id> 深链：主页会议卡片点击后直达该会议详情。
@@ -73,11 +74,21 @@ export default function HistoryPage() {
     loadMeetings();
   }, []);
 
+  const meetingQueryRef = useRef('');
   useEffect(() => {
     if (tab !== 'meeting') return;
-    const timer = window.setInterval(() => void loadMeetings(), 15000);
+    // 轮询带上当前检索词，避免定时刷新覆盖搜索结果。
+    const timer = window.setInterval(() => void loadMeetings(meetingQueryRef.current), 15000);
     return () => window.clearInterval(timer);
   }, [tab]);
+
+  useEffect(() => {
+    if (tab !== 'meeting') return;
+    meetingQueryRef.current = meetingQuery;
+    const timer = window.setTimeout(() => void loadMeetings(meetingQuery), 250);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meetingQuery, tab]);
 
   const selectedJobRunning = Boolean(selected?.jobs?.some((job) => !['completed', 'failed', 'cancelled'].includes(job.status)));
   useEffect(() => {
@@ -151,8 +162,7 @@ export default function HistoryPage() {
         </div>
         {tab === 'video' && (
           <>
-            <input className="search-input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索标题、作者或平台" />
-            <select value={platform} onChange={(e) => setPlatform(e.target.value)}>
+            <input className="search-input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索标题、作者或平台" />            <select value={platform} onChange={(e) => setPlatform(e.target.value)}>
               <option value="">全部平台</option>
               {platforms.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
@@ -183,6 +193,15 @@ export default function HistoryPage() {
             </div>
             <button type="button" className="outline-button" onClick={() => load()}>筛选</button>
           </>
+        )}
+        {tab === 'meeting' && (
+          <input
+            className="search-input"
+            value={meetingQuery}
+            onChange={(e) => setMeetingQuery(e.target.value)}
+            placeholder="搜索标题、转录内容或纪要内容"
+            aria-label="搜索会议"
+          />
         )}
       </div>
       <Toast message={toast} onClose={() => setToast('')} />
@@ -230,6 +249,9 @@ export default function HistoryPage() {
               meetingId={selectedMeeting?.id}
               templates={templates}
               onToast={(message) => setToast(message)}
+              onRenamed={(id, title) => {
+                setMeetings((current) => current.map((item) => item.id === id ? { ...item, title } : item));
+              }}
             />
           )}
         </section>

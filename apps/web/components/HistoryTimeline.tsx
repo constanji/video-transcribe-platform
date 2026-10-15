@@ -7,6 +7,21 @@ import type { Platform, VideoAsset } from '../lib/types';
 
 const TYPE_LABEL: Record<string, string> = { parse: '解析', download: '下载', transcribe: '转录', summarize: '总结' };
 
+const JOB_STATUS: Record<string, { label: string; kind: string }> = {
+  queued: { label: '排队中', kind: 'busy' },
+  running: { label: '进行中', kind: 'busy' },
+  completed: { label: '已完成', kind: 'ok' },
+  failed: { label: '失败', kind: 'err' },
+  cancelled: { label: '已取消', kind: '' },
+};
+
+const PARSE_STATUS: Record<string, { label: string; kind: string }> = {
+  parsed: { label: '已解析', kind: 'ok' },
+  uploaded: { label: '文件就绪', kind: 'busy' },
+  pending: { label: '待解析', kind: '' },
+  failed: { label: '解析失败', kind: 'err' },
+};
+
 function groupLabel(date: Date) {
   const today = new Date();
   const start = (value: Date) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
@@ -66,15 +81,24 @@ export default function HistoryTimeline({
                   {item.thumbnail_url ? <img src={withToken(item.thumbnail_url)} alt="" /> : <span>◈</span>}
                 </div>
                 <div className="history-main">
-                  <strong>{item.title}</strong>
-                  <small>
+                  <strong className="history-title">{item.title}</strong>
+                  <small className="history-meta">
                     <img src={logoSrc(platform?.logo)} alt="" width={12} height={12} />
                     {platform?.name || item.platform || '未知平台'} · {TYPE_LABEL[latest?.job_type || 'parse'] || '解析'}
                   </small>
-                  <small>
-                    {latest?.status || item.parse_status} · {new Date(item.last_processed_at || item.created_at).toLocaleTimeString('zh-CN', { hour12: false })}
-                    {image ? ' · 图片' : item.has_summary ? ' · 总结已完成' : ' · 总结未完成'}
-                  </small>
+                  <div className="history-tags">
+                    {(() => {
+                      const raw = latest?.status || item.parse_status;
+                      const info = (latest ? JOB_STATUS : PARSE_STATUS)[raw] || { label: raw || '—', kind: '' };
+                      return <em className={`history-tag ${info.kind}`}>{info.label}</em>;
+                    })()}
+                    <em className="history-tag time">
+                      {new Date(item.last_processed_at || item.created_at).toLocaleTimeString('zh-CN', { hour12: false })}
+                    </em>
+                    {image
+                      ? <em className="history-tag">图片</em>
+                      : <em className={`history-tag ${item.has_summary ? 'flag-on' : 'flag-off'}`}>{item.has_summary ? '已总结' : '未总结'}</em>}
+                  </div>
                 </div>
               </button>
             );

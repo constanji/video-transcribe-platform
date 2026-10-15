@@ -9,8 +9,10 @@ export function meetingWsUrl(meetingId: string) {
   return `${wsBase}/api/v1/meetings/${meetingId}/live${query}`;
 }
 
-export function listMeetings() {
-  return api<MeetingHistoryItem[]>('/api/v1/meetings');
+export function listMeetings(q?: string) {
+  const keyword = q?.trim();
+  const query = keyword ? `?q=${encodeURIComponent(keyword)}` : '';
+  return api<MeetingHistoryItem[]>(`/api/v1/meetings${query}`);
 }
 
 export function createMeeting(body: { title?: string; mode: 'live' | 'recording'; language: string; audio_source: string }) {
