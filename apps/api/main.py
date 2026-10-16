@@ -1151,7 +1151,10 @@ def list_videos(user: Any = Depends(get_current_user), session: Session = Depend
 
 def _is_image_record(item: dict[str, Any]) -> bool:
     variants = item.get("variants") or []
-    kinds = {variant.get("media_type") for variant in variants}
+    kinds = {
+        "image" if (variant.get("media_type") == "file" and (variant.get("format") or "").lower() == "zip") else variant.get("media_type")
+        for variant in variants
+    }
     return "image" in kinds and not ({"video", "audio"} & kinds)
 
 
