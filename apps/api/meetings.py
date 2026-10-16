@@ -493,7 +493,8 @@ def create_meeting(payload: CreateMeetingRequest, request: Request, session: Ses
     language = payload.language or "zh"
     if language not in {"zh", "auto", "en"}:
         raise HTTPException(400, "不支持的转录语言")
-    stamp = _now().strftime("会议 %Y-%m-%d %H:%M")
+    # 标题面向用户，用本地时间；_now() 是 UTC，直接格式化会差时区（曾显示 01:49 实为 09:49）
+    stamp = _now().astimezone().strftime("会议 %Y-%m-%d %H:%M")
     owner = _principal_user(session, *auth)
     meeting = Meeting(
         title=(payload.title or "").strip() or stamp,
