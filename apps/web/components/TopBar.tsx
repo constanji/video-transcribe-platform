@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { api } from '../lib/api';
 import { useAuth } from '../app/providers';
 
@@ -56,15 +57,16 @@ export default function TopBar({ active }: { active: 'meeting' | 'parse' | 'hist
 
   return (
     <header className="topbar">
-      <a className="brand" href="/">
+      <Link className="brand" href="/">
         <span className="brand-mark">◈</span>
         <span>MediaFlow</span>
-      </a>
+      </Link>
       <nav className="nav-tabs">
-        <a className={active === 'meeting' ? 'active' : ''} href="/">会议纪要</a>
-        <a className={active === 'parse' ? 'active' : ''} href="/parse">通用解析</a>
-        <a className={active === 'history' ? 'active' : ''} href="/history">历史解析任务</a>
-        <a className={active === 'settings' ? 'active' : ''} href="/settings">设置</a>
+        {/* 用 next/link 而非 <a>：切页走客户端路由，保住录音中的 MediaStream/WebSocket 等页面外状态。 */}
+        <Link className={active === 'meeting' ? 'active' : ''} href="/">会议纪要</Link>
+        <Link className={active === 'parse' ? 'active' : ''} href="/parse">通用解析</Link>
+        <Link className={active === 'history' ? 'active' : ''} href="/history">历史解析任务</Link>
+        <Link className={active === 'settings' ? 'active' : ''} href="/settings">设置</Link>
       </nav>
       <div className={`service-state ${state.kind}`}><span /> {state.text}</div>
       {user ? (

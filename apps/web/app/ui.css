@@ -400,3 +400,34 @@ a.recent-card{text-decoration:none;color:inherit;display:block}
 .timeline-item.deleting .history-thumb{filter:grayscale(1)}
 button.primary-button:disabled{opacity:.6;cursor:progress}
 .platform-badge img{width:16px;height:16px;object-fit:contain;flex:none}
+
+/* 会议转录全局悬浮条：站内任意页面可控制录音进度 */
+.meeting-dock{
+  position:fixed;left:50%;bottom:22px;transform:translateX(-50%);
+  display:flex;align-items:center;gap:12px;
+  padding:10px 16px;border-radius:999px;
+  background:#1c2333;color:#eef2fb;
+  box-shadow:0 8px 28px rgba(15,23,42,.35);
+  z-index:1200;white-space:nowrap;
+}
+.meeting-dock-dot{width:9px;height:9px;border-radius:50%;flex:none}
+.meeting-dock-dot.live{background:#3ddc84;animation:dock-pulse 1.6s ease-in-out infinite}
+.meeting-dock-dot.busy{background:#f5b942;animation:dock-pulse 1.6s ease-in-out infinite}
+.meeting-dock-dot.paused{background:#8a93a8;animation:none}
+@keyframes dock-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.meeting-dock-time{font-variant-numeric:tabular-nums;font-weight:600;font-size:14px}
+.meeting-dock-status{font-size:13px;color:#c6cede}
+.meeting-dock-status em{font-style:normal;color:#8f99ad}
+.meeting-dock-actions{display:flex;align-items:center;gap:8px}
+.meeting-dock-actions button{
+  border:1px solid rgba(255,255,255,.28);background:transparent;color:#eef2fb;
+  border-radius:8px;padding:4px 12px;font-size:13px;cursor:pointer;
+}
+.meeting-dock-actions button:hover{background:rgba(255,255,255,.12)}
+.meeting-dock-actions button.primary{background:#3b6ef5;border-color:#3b6ef5}
+.meeting-dock-actions button.primary:hover{background:#2f5cd8}
+.meeting-dock-back{font-size:13px;color:#9db4f5;text-decoration:none}
+.meeting-dock-back:hover{text-decoration:underline}
+@media (prefers-reduced-motion: reduce){
+  .meeting-dock-dot.live,.meeting-dock-dot.busy{animation:none}
+}

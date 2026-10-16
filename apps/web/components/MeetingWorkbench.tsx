@@ -1,37 +1,13 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { api } from '../lib/api';
-import { MeetingCapture, pcm16ToBase64, type AudioSource } from '../lib/meeting-capture';
-import { cancelJob, createMeeting, deleteMeeting, getMeeting, meetingWsUrl, retryTranscribe, uploadMeetingAudio } from '../lib/meeting-api';
-import type { Job, MeetingRecord, MeetingSegment, Platform, VideoAsset } from '../lib/types';
+import { useEffect, useRef } from 'react';
+import { MAX_FILE_BYTES, meetingSession, useMeetingSession, type MeetingMode } from '../lib/meeting-session';
+import type { AudioSource } from '../lib/meeting-capture';
+import type { Platform, Template } from '../lib/types';
 import ParsedVideoCard from './ParsedVideoCard';
 import SummaryProgress from './SummaryProgress';
 
-type Mode = 'live' | 'recording';
-type Phase = 'idle' | 'starting' | 'recording' | 'paused' | 'uploading' | 'stopping' | 'processing' | 'ready';
-
 const ACCEPT = '.mp3,.wav,.m4a,.mp4,.webm,.mov';
-const MAX_FILE_BYTES = 500 * 1024 * 1024;
-
-// 单块确认超时 / 重试上限：没有它，任一帧丢失都会永久卡住整条有序队列。
-const MAX_ATTEMPTS = 5;
-const ACK_TIMEOUT_MS = 45000;
-// 本地溢出队列上限（每块最多 16s → 最多约 128s 缓冲）。
-const MAX_QUEUE = 8;
-const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000];
-const PING_INTERVAL_MS = 30000;
-
-type OutChunk = {
-  seq: number;
-  pcm: Int16Array;
-  offsetMs: number;
-  endMs: number;
-  attempts: number;
-  holdCount: number;
-  sent: boolean;
-  timer: number | null;
-};
 
 function formatClock(ms: number) {
   const total = Math.floor(ms / 1000);
@@ -54,588 +30,55 @@ function sourceHint(source: AudioSource) {
   return '同时采集麦克风和系统音频。系统声仍需在弹窗中勾选「共享音频」。';
 }
 
+/**
+ * 会议工作台：纯 UI 视图。录音/转写运行时在 lib/meeting-session.ts 的全局单例里，
+ * 切到其他页面（客户端路由）后会话继续在后台跑，由悬浮条接管控制。
+ */
 export default function MeetingWorkbench({
   platforms,
+  templates,
+  templateId,
   onToast,
 }: {
   platforms: Platform[];
+  templates: Template[];
+  templateId: string;
   onToast: (message: string, kind?: 'success' | 'error') => void;
 }) {
-  const [mode, setMode] = useState<Mode>('live');
-  const [phase, setPhase] = useState<Phase>('idle');
-  const [source, setSource] = useState<AudioSource>('mic');
-  const [language, setLanguage] = useState('zh');
-  const [level, setLevel] = useState(0);
-  const [elapsed, setElapsed] = useState(0);
-  const [segments, setSegments] = useState<MeetingSegment[]>([]);
-  const [meeting, setMeeting] = useState<MeetingRecord | null>(null);
-  const [video, setVideo] = useState<VideoAsset | null>(null);
-  const [job, setJob] = useState<Job | null>(null);
-  const [mossReady, setMossReady] = useState(false);
-  const [mossMessage, setMossMessage] = useState('正在检查转录服务…');
-  const [lagSec, setLagSec] = useState(0);
-  const [busyHint, setBusyHint] = useState('');
-  const [failure, setFailure] = useState<string | null>(null);
-  const [retrying, setRetrying] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
-  const captureRef = useRef<MeetingCapture | null>(null);
-  const socketRef = useRef<WebSocket | null>(null);
-  const seqRef = useRef(0);
-  const inflightRef = useRef<OutChunk | null>(null);
-  const queueRef = useRef<OutChunk[]>([]);
-  const ackedEndRef = useRef(0);
-  const finishingRef = useRef(false);
-  const reconnectRef = useRef(0);
-  const liveDegradedRef = useRef(false);
-  const uploadAbortRef = useRef<AbortController | null>(null);
-  const phaseRef = useRef<Phase>('idle');
-  const meetingIdRef = useRef<string | null>(null);
+  const state = useMeetingSession();
+  const {
+    mode, phase, source, language, level, elapsed, segments, meeting, video, job,
+    busyHint, failure, lagSec, uploadProgress, cancelling, retrying, mossReady, mossMessage,
+  } = state;
+
+  // 会话动作产生的提示统一走单例的 toast 通道（悬浮条在别的页面时也能收到）。
+  useEffect(() => {
+    meetingSession.setToastHandler(onToast);
+    return () => meetingSession.setToastHandler(null);
+  }, [onToast]);
+
   const listRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
-  const busy = phase === 'starting' || phase === 'stopping';
-
-  useEffect(() => {
-    phaseRef.current = phase;
-  }, [phase]);
-
-  useEffect(() => {
-    meetingIdRef.current = meeting?.id || null;
-  }, [meeting?.id]);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function tick() {
-      try {
-        const health = await api<any>('/api/system/health');
-        if (cancelled) return;
-        setMossReady(Boolean(health.moss_reachable && health.moss_model_loaded));
-        if (!health.moss_reachable) setMossMessage('转录服务未连接');
-        else if (health.moss_model_loading) setMossMessage('模型加载中，就绪后再开始');
-        else if (!health.moss_model_loaded) setMossMessage('转录模型尚未加载');
-        else setMossMessage('转录服务已就绪');
-      } catch {
-        if (!cancelled) {
-          setMossReady(false);
-          setMossMessage('转录服务未连接');
-        }
-      }
-    }
-    tick();
-    const timer = window.setInterval(tick, 4000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    api<any>('/api/settings/transcription').then((settings) => {
-      if (settings.default_language) setLanguage(settings.default_language);
-    }).catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
-    if (phase !== 'recording' && phase !== 'paused') return;
-    const timer = window.setInterval(() => {
-      setElapsed(captureRef.current?.elapsedMs() || 0);
-    }, 250);
-    return () => window.clearInterval(timer);
-  }, [phase]);
-
-  // 暂停时采集已停止，不再产生电平帧；主动归零，避免电平条停在最后一次的值。
-  useEffect(() => {
-    if (phase === 'paused') setLevel(0);
-  }, [phase]);
-
-  // 滞后提示：已录制时长减去最后一块已确认字幕的结束时间。
-  useEffect(() => {
-    if (phase !== 'recording' && phase !== 'paused') {
-      setLagSec(0);
-      return;
-    }
-    const timer = window.setInterval(() => {
-      if (!ackedEndRef.current) {
-        setLagSec(0);
-        return;
-      }
-      const elapsedMs = captureRef.current?.elapsedMs() || 0;
-      setLagSec(Math.max(0, Math.round((elapsedMs - ackedEndRef.current) / 1000)));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [phase]);
-
-  // 心跳：长时间静默不发言时也刷新服务端 updated_at，避免会议被僵尸清扫误判。
-  useEffect(() => {
-    if (phase !== 'recording' && phase !== 'paused') return;
-    const timer = window.setInterval(() => {
-      const socket = socketRef.current;
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'ping' }));
-      }
-    }, PING_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [phase]);
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
   }, [segments.length]);
 
-  useEffect(() => {
-    if (phase !== 'processing' || !meeting?.id) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const next = await getMeeting(meeting.id);
-        setMeeting(next);
-        if (next.job) setJob(next.job);
-        if (next.video) setVideo(next.video);
-        if (next.transcript?.segments?.length) setSegments(next.transcript.segments);
-        if (next.status === 'ready') {
-          if (next.video_id) {
-            const detail = await api<VideoAsset>(`/api/videos/${next.video_id}`);
-            setVideo(detail);
-          } else if (next.video) {
-            setVideo(next.video);
-          }
-          setFailure(null);
-          setPhase('ready');
-          onToast('终稿转录完成，可以生成会议纪要');
-        } else if (
-          next.status === 'failed' ||
-          (next.job && (next.job.status === 'failed' || next.job.status === 'cancelled'))
-        ) {
-          // 任务侧失败但会议状态还没同步时也要给出出口，否则前端会永远停在「转录中」。
-          const reason = next.error_message || next.job?.error_message || '终稿转录失败';
-          setFailure(reason);
-          setPhase('idle');
-          onToast(reason, 'error');
-        }
-      } catch (err) {
-        onToast((err as Error).message, 'error');
-      }
-    }, 1500);
-    return () => window.clearInterval(timer);
-  }, [meeting?.id, phase, onToast]);
-
-  function clearTimers() {
-    if (inflightRef.current?.timer) window.clearTimeout(inflightRef.current.timer);
-    queueRef.current.forEach((chunk) => {
-      if (chunk.timer) window.clearTimeout(chunk.timer);
-    });
-  }
-
-  function resetSession() {
-    clearTimers();
-    socketRef.current?.close();
-    socketRef.current = null;
-    captureRef.current = null;
-    seqRef.current = 0;
-    inflightRef.current = null;
-    queueRef.current = [];
-    ackedEndRef.current = 0;
-    finishingRef.current = false;
-    reconnectRef.current = 0;
-    liveDegradedRef.current = false;
-    uploadAbortRef.current?.abort();
-    uploadAbortRef.current = null;
-    setBusyHint('');
-    setFailure(null);
-    setLagSec(0);
-    setElapsed(0);
-    setLevel(0);
-    setSegments([]);
-    setMeeting(null);
-    setVideo(null);
-    setJob(null);
-    setUploadProgress(null);
-    setPhase('idle');
-  }
-
-  function onChunkTimeout(chunk: OutChunk) {
-    if (inflightRef.current !== chunk) return;
-    if (chunk.attempts >= MAX_ATTEMPTS) {
-      dropChunk(chunk, '转写超时');
-      return;
-    }
-    chunk.sent = false;
-    sendChunk(chunk, 1500);
-  }
-
-  function sendChunk(chunk: OutChunk, delayMs: number) {
-    if (chunk.timer) {
-      window.clearTimeout(chunk.timer);
-      chunk.timer = null;
-    }
-    const fire = () => {
-      chunk.timer = null;
-      if (inflightRef.current !== chunk) return;
-      const socket = socketRef.current;
-      if (!socket || socket.readyState !== WebSocket.OPEN) {
-        // 断线：留在在途，重连成功后由 pump 补发；长时间连不上则丢弃。
-        chunk.sent = false;
-        chunk.holdCount += 1;
-        if (chunk.holdCount > 30) {
-          dropChunk(chunk, '通道断开');
-          return;
-        }
-        chunk.timer = window.setTimeout(fire, 1500);
-        return;
-      }
-      chunk.attempts += 1;
-      chunk.sent = true;
-      chunk.holdCount = 0;
-      socket.send(JSON.stringify({
-        type: 'audio',
-        seq: chunk.seq,
-        sample_rate: 16000,
-        offset_ms: Math.round(chunk.offsetMs),
-        pcm16: pcm16ToBase64(chunk.pcm),
-      }));
-      chunk.timer = window.setTimeout(() => onChunkTimeout(chunk), ACK_TIMEOUT_MS);
-    };
-    if (delayMs > 0) chunk.timer = window.setTimeout(fire, delayMs);
-    else fire();
-  }
-
-  function dropChunk(chunk: OutChunk, why: string) {
-    if (chunk.timer) window.clearTimeout(chunk.timer);
-    if (inflightRef.current === chunk) inflightRef.current = null;
-    onToast(`有一段音频${why}，已跳过`, 'error');
-    pump();
-  }
-
-  // 服务端串行处理，客户端只允许一块在途：避免 WS 缓冲无界堆积。
-  function pump() {
-    const socket = socketRef.current;
-    const open = Boolean(socket && socket.readyState === WebSocket.OPEN);
-    const inflight = inflightRef.current;
-    if (inflight) {
-      if (open && !inflight.sent) sendChunk(inflight, 0);
-      return;
-    }
-    if (!open) return;
-    const next = queueRef.current.shift();
-    if (!next) return;
-    seqRef.current += 1;
-    next.seq = seqRef.current;
-    inflightRef.current = next;
-    sendChunk(next, 0);
-  }
-
-  function enqueue(pcm: Int16Array, offsetMs: number) {
-    if (queueRef.current.length >= MAX_QUEUE) {
-      // 不再把块无限合并成超长请求。完整录音仍由 MediaRecorder 保存，停止后终稿不会丢。
-      if (!liveDegradedRef.current) {
-        liveDegradedRef.current = true;
-        setBusyHint('实时字幕已跟不上，将以停录后的终稿为准');
-        onToast('实时字幕延迟过高，已暂停发送新字幕块；完整录音仍会保存', 'error');
-      }
-      return;
-    }
-    const endMs = offsetMs + (pcm.length / 16000) * 1000;
-    queueRef.current.push({ seq: 0, pcm, offsetMs, endMs, attempts: 0, holdCount: 0, sent: false, timer: null });
-    pump();
-  }
-
-  function handleSocketMessage(payload: any, succeed: () => void) {
-    if (payload.type === 'ready') {
-      setBusyHint('');
-      succeed();
-      return;
-    }
-    if (payload.type === 'pong') return;
-    if (payload.type === 'busy') {
-      setBusyHint('转录服务繁忙，正在排队…');
-      const inflight = inflightRef.current;
-      if (inflight && inflight.seq === payload.seq) {
-        if (inflight.attempts >= MAX_ATTEMPTS) dropChunk(inflight, '因服务繁忙超时');
-        else sendChunk(inflight, Math.max(1000, (Number(payload.retry_after) || 2) * 1000));
-      }
-      return;
-    }
-    if (payload.type === 'segment') {
-      setBusyHint('');
-      if (payload.segments?.length) {
-        setSegments((current) => [...current, ...payload.segments]);
-      }
-      const inflight = inflightRef.current;
-      if (inflight && inflight.seq === payload.seq) {
-        if (inflight.timer) window.clearTimeout(inflight.timer);
-        ackedEndRef.current = inflight.endMs;
-        inflightRef.current = null;
-        pump();
-      }
-      return;
-    }
-    if (payload.type === 'error') {
-      const inflight = inflightRef.current;
-      if (payload.seq && inflight && inflight.seq === payload.seq) {
-        if (inflight.attempts >= MAX_ATTEMPTS) dropChunk(inflight, '转写失败');
-        else sendChunk(inflight, 2000);
-      } else {
-        onToast(payload.message || '实时转写出错', 'error');
-      }
-    }
-  }
-
-  function scheduleReconnect() {
-    const current = phaseRef.current;
-    if (finishingRef.current || (current !== 'recording' && current !== 'paused')) return;
-    const attempt = reconnectRef.current;
-    if (attempt >= RECONNECT_DELAYS.length) {
-      onToast('实时转写通道断开，已放弃重连', 'error');
-      return;
-    }
-    reconnectRef.current = attempt + 1;
-    onToast('实时转写通道断开，正在重连…');
-    window.setTimeout(async () => {
-      if (finishingRef.current) return;
-      const meetingId = meetingIdRef.current;
-      if (!meetingId) return;
-      try {
-        await openSocket(meetingId);
-        reconnectRef.current = 0;
-        // 断线期间在途块可能已发出但收不到确认：立即用同一 seq 重发（服务端幂等去重）。
-        if (inflightRef.current) inflightRef.current.sent = false;
-        pump();
-        onToast('实时转写通道已恢复');
-      } catch {
-        scheduleReconnect();
-      }
-    }, RECONNECT_DELAYS[attempt]);
-  }
-
-  async function openSocket(meetingId: string) {
-    await new Promise<void>((resolve, reject) => {
-      const socket = new WebSocket(meetingWsUrl(meetingId));
-      socketRef.current = socket;
-      let settled = false;
-      let opened = false;
-      const timer = window.setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        reject(new Error('实时转写通道超时'));
-      }, 8000);
-      const succeed = () => {
-        if (settled) return;
-        settled = true;
-        opened = true;
-        window.clearTimeout(timer);
-        resolve();
-      };
-      socket.onerror = () => {
-        window.clearTimeout(timer);
-        if (settled) return;
-        settled = true;
-        reject(new Error('实时转写通道连接失败'));
-      };
-      socket.onmessage = (event) => {
-        try {
-          handleSocketMessage(JSON.parse(event.data), succeed);
-        } catch {
-          onToast('实时转写消息无法解析', 'error');
-        }
-      };
-      socket.onclose = () => {
-        if (socketRef.current === socket) socketRef.current = null;
-        window.clearTimeout(timer);
-        if (!settled) {
-          settled = true;
-          reject(new Error('实时转写通道已断开'));
-          return;
-        }
-        // 仅在「连接曾建立后又断开」时重连；建连失败由调用方 catch 触发。
-        if (opened) scheduleReconnect();
-      };
-    });
-  }
-
-  async function drain(timeoutMs: number) {
-    const deadline = Date.now() + timeoutMs;
-    while ((inflightRef.current || queueRef.current.length) && Date.now() < deadline) {
-      await new Promise((resolve) => window.setTimeout(resolve, 200));
-    }
-    return !inflightRef.current && queueRef.current.length === 0;
-  }
-
-  async function start() {
-    if (!mossReady) {
-      onToast(mossMessage, 'error');
-      return;
-    }
-    setFailure(null);
-    setPhase('starting');
-    try {
-      const created = await createMeeting({ mode, language, audio_source: source });
-      setMeeting(created);
-      if (mode === 'live') await openSocket(created.id);
-      const capture = new MeetingCapture(source, mode === 'live', {
-        onLevel: setLevel,
-        onSpeechSegment: enqueue,
-        onStreamEnded: async (reason) => {
-          onToast(reason, 'error');
-          if (captureRef.current) await finish();
-        },
-      });
-      captureRef.current = capture;
-      await capture.start();
-      setPhase('recording');
-      onToast(mode === 'live' ? '已开始实时转录' : '已开始录音');
-    } catch (err) {
-      captureRef.current = null;
-      socketRef.current?.close();
-      setPhase('idle');
-      onToast((err as Error).message, 'error');
-    }
-  }
-
-  async function finish() {
-    const capture = captureRef.current;
-    const current = meeting;
-    if (!capture || !current) return;
-    setPhase('stopping');
-    finishingRef.current = true;
-    try {
-      // ① 先停止采集：capture.stop() 内部 flushSpeech(true) 会把最后不足一块的语音也入队。
-      const file = await capture.stop();
-      captureRef.current = null;
-      // ② 等在途与队列全部转写完成，再发 WS stop。
-      //    服务端 WS 循环是全串行的，「stop」排在最后一块 audio 之后才能保证它被处理入库。
-      const drained = await drain(30000);
-      if (!drained) {
-        const left = queueRef.current.length + (inflightRef.current ? 1 : 0);
-        onToast(`仍有 ${left} 段音频未转写完，已跳过`, 'error');
-      }
-      if (socketRef.current?.readyState === WebSocket.OPEN) {
-        socketRef.current.send(JSON.stringify({ type: 'stop' }));
-      }
-      socketRef.current?.close();
-      socketRef.current = null;
-      // ③ 先无条件落盘音频（transcribe=false，与转写解耦），保证「停止即保存」。
-      //    即使 MOSS 忙/未就绪，录音文件也已持久化，可稍后用重试按钮重跑转写。
-      setUploadProgress(0);
-      const saved = await uploadMeetingAudio(current.id, file, false, setUploadProgress);
-      setUploadProgress(null);
-      setMeeting(saved);
-      if (saved.video) setVideo(saved.video);
-      // ④ 落盘成功后再单独启动终稿转录。
-      if (mossReady) {
-        setPhase('processing');
-        const next = await retryTranscribe(current.id);
-        setMeeting(next);
-        setJob(next.job || null);
-        if (next.video) setVideo(next.video);
-        onToast('录音已保存，正在生成终稿转录');
-      } else {
-        setFailure('录音已保存，但转录服务未就绪，可稍后点击「重试终稿转录」');
-        setPhase('idle');
-        onToast(mossMessage, 'error');
-      }
-    } catch (err) {
-      // 音频可能已部分落盘；失败时不误报「没保存」，仅提示转写未完成。
-      setFailure('录音可能未完整保存，请重试录制');
-      setPhase('idle');
-      onToast((err as Error).message, 'error');
-    } finally {
-      setUploadProgress(null);
-      finishingRef.current = false;
-    }
-  }
-
-  // 取消在途的终稿转录：后端会同时 kill 掉 MOSS 的推理子进程，立刻释放推理锁。
-  async function cancelTranscription() {
-    const currentJob = job;
-    if (!currentJob) return;
-    setCancelling(true);
-    try {
-      const updated = await cancelJob(currentJob.id);
-      setJob(updated);
-      setFailure('任务已取消，可以在下面重新开始终稿转录');
-      setPhase('idle');
-      onToast('已取消终稿转录');
-    } catch (err) {
-      onToast((err as Error).message, 'error');
-    } finally {
-      setCancelling(false);
-    }
-  }
-
-  // 终稿转录失败/中断后的重试：录音文件还在，直接重跑，不必重新录制。
-  async function retryFinalTranscript() {
-    const current = meeting;
-    if (!current) return;
-    if (!mossReady) {
-      onToast(mossMessage, 'error');
-      return;
-    }
-    setRetrying(true);
-    try {
-      const next = await retryTranscribe(current.id);
-      setMeeting(next);
-      setJob(next.job || null);
-      if (next.video) setVideo(next.video);
-      setFailure(null);
-      setPhase('processing');
-      onToast('已重新启动终稿转录');
-    } catch (err) {
-      onToast((err as Error).message, 'error');
-    } finally {
-      setRetrying(false);
-    }
-  }
-
-  async function importFile(file: File) {
-    if (file.size > MAX_FILE_BYTES) {
-      onToast('单个文件不能超过 500MB', 'error');
-      return;
-    }
-    if (!mossReady) {
-      onToast(mossMessage, 'error');
-      return;
-    }
-    setFailure(null);
-    setPhase('starting');
-    let createdId: string | null = null;
-    try {
-      const created = await createMeeting({ mode: 'recording', language, audio_source: source, title: file.name.replace(/\.[^.]+$/, '') });
-      createdId = created.id;
-      setMeeting(created);
-      setPhase('uploading');
-      setUploadProgress(0);
-      const controller = new AbortController();
-      uploadAbortRef.current = controller;
-      const next = await uploadMeetingAudio(created.id, file, true, setUploadProgress, controller.signal);
-      uploadAbortRef.current = null;
-      setUploadProgress(null);
-      setPhase('processing');
-      setMeeting(next);
-      setJob(next.job || null);
-      if (next.video) setVideo(next.video);
-      onToast('文件已导入，正在转录');
-    } catch (err) {
-      uploadAbortRef.current = null;
-      if ((err as Error).message === '上传已取消' && createdId) {
-        await deleteMeeting(createdId).catch(() => undefined);
-      }
-      setUploadProgress(null);
-      setPhase('idle');
-      onToast((err as Error).message, 'error');
-    }
-  }
-
   const recording = phase === 'recording' || phase === 'paused';
+  const busy = phase === 'starting' || phase === 'stopping';
   const locked = phase !== 'idle';
   const videoReady = Boolean(video && (phase === 'ready' || meeting?.status === 'ready'));
+  const preferredTemplate = templates.find((item) => item.id === templateId)?.name;
 
   return (
     <div className="meeting-workbench">
       <section className={`workspace-card meeting-card${phase === 'paused' ? ' is-paused' : ''}`}>
         <div className="mode-switch meeting-modes">
-          <button type="button" className={mode === 'live' ? 'selected' : ''} disabled={locked} onClick={() => setMode('live')}>
+          <button type="button" className={mode === 'live' ? 'selected' : ''} disabled={locked} onClick={() => meetingSession.setMode('live' as MeetingMode)}>
             <strong>◎</strong>
             <span>实时转录<small>边录边出字，停录后生成终稿再总结</small></span>
           </button>
-          <button type="button" className={mode === 'recording' ? 'selected' : ''} disabled={locked} onClick={() => setMode('recording')}>
+          <button type="button" className={mode === 'recording' ? 'selected' : ''} disabled={locked} onClick={() => meetingSession.setMode('recording' as MeetingMode)}>
             <strong>●</strong>
             <span>录音转录<small>先录完整段或导入文件，停止后整段转写</small></span>
           </button>
@@ -643,7 +86,7 @@ export default function MeetingWorkbench({
         <div className="meeting-controls">
           <label>
             音源
-            <select value={source} disabled={locked} onChange={(event) => setSource(event.target.value as AudioSource)}>
+            <select value={source} disabled={locked} onChange={(event) => meetingSession.setSource(event.target.value as AudioSource)}>
               <option value="mic">麦克风</option>
               <option value="system">系统音频（屏幕共享）</option>
               <option value="both">麦克风 + 系统音频</option>
@@ -651,7 +94,7 @@ export default function MeetingWorkbench({
           </label>
           <label>
             语言
-            <select value={language} disabled={locked} onChange={(event) => setLanguage(event.target.value)}>
+            <select value={language} disabled={locked} onChange={(event) => meetingSession.setLanguage(event.target.value)}>
               <option value="zh">中文</option>
               <option value="auto">自动识别</option>
               <option value="en">英语</option>
@@ -671,28 +114,19 @@ export default function MeetingWorkbench({
         )}
         <div className="meeting-actions">
           {phase === 'idle' ? (
-            <button type="button" className="primary-button" onClick={start} disabled={!mossReady || busy}>开始</button>
+            <button type="button" className="primary-button" onClick={() => meetingSession.start()} disabled={!mossReady || busy}>开始</button>
           ) : null}
           {phase === 'ready' ? (
-            <button type="button" className="outline-button" onClick={resetSession}>新开一场</button>
+            <button type="button" className="outline-button" onClick={() => meetingSession.resetSession()}>新开一场</button>
           ) : null}
           {recording ? (
             <>
               <button
                 type="button"
                 className={phase === 'paused' ? 'primary-button' : 'outline-button'}
-                onClick={() => {
-                  if (phase === 'paused') {
-                    captureRef.current?.resume();
-                    setPhase('recording');
-                  } else {
-                    captureRef.current?.pause();
-                    setLevel(0);
-                    setPhase('paused');
-                  }
-                }}
+                onClick={() => meetingSession.togglePause()}
               >{phase === 'paused' ? '继续' : '暂停'}</button>
-              <button type="button" className={phase === 'paused' ? 'outline-button' : 'primary-button'} onClick={finish}>停止</button>
+              <button type="button" className={phase === 'paused' ? 'outline-button' : 'primary-button'} onClick={() => meetingSession.finish()}>停止</button>
             </>
           ) : null}
           {phase === 'starting' ? <button type="button" className="primary-button" disabled>正在启动…</button> : null}
@@ -700,14 +134,14 @@ export default function MeetingWorkbench({
           {phase === 'uploading' ? (
             <>
               <button type="button" className="primary-button" disabled>正在上传… {uploadProgress ?? 0}%</button>
-              <button type="button" className="outline-button" onClick={() => uploadAbortRef.current?.abort()}>取消上传</button>
+              <button type="button" className="outline-button" onClick={() => meetingSession.abortUpload()}>取消上传</button>
             </>
           ) : null}
           {phase === 'processing' ? (
             <>
               <button type="button" className="outline-button" disabled>终稿转录中…</button>
               {job ? (
-                <button type="button" className="outline-button" onClick={cancelTranscription} disabled={cancelling}>
+                <button type="button" className="outline-button" onClick={() => meetingSession.cancelTranscription()} disabled={cancelling}>
                   {cancelling ? '正在取消…' : '取消转录'}
                 </button>
               ) : null}
@@ -776,13 +210,13 @@ export default function MeetingWorkbench({
             onDrop={(event) => {
               event.preventDefault();
               const file = event.dataTransfer.files[0];
-              if (file) importFile(file);
+              if (file) meetingSession.importFile(file);
             }}
           >
             <input ref={fileRef} type="file" accept={ACCEPT} hidden onChange={(event) => {
               const file = event.target.files?.[0];
               event.target.value = '';
-              if (file) importFile(file);
+              if (file) meetingSession.importFile(file);
             }} />
             <span className="upload-icon">↑</span>
             <strong>拖拽文件到这里，或点击选择</strong>
@@ -808,7 +242,7 @@ export default function MeetingWorkbench({
             <button
               type="button"
               className="primary-button"
-              onClick={retryFinalTranscript}
+              onClick={() => meetingSession.retryFinalTranscript()}
               disabled={retrying || !mossReady}
             >{retrying ? '正在重新启动…' : '重试终稿转录'}</button>
           </div>
@@ -826,7 +260,7 @@ export default function MeetingWorkbench({
           loading={false}
           initialPanel="summarize"
           meetingMode
-          preferredTemplateName="标准会议纪要"
+          preferredTemplateName={preferredTemplate}
           onReparse={() => undefined}
           onToast={onToast}
         />

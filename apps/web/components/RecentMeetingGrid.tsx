@@ -1,6 +1,8 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import type { MeetingHistoryItem } from '../lib/types';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -98,11 +100,12 @@ export default function RecentMeetingGrid({
   onDelete?: (item: MeetingHistoryItem) => void;
   onRename?: (item: MeetingHistoryItem, title: string) => void;
 }) {
+  const router = useRouter();
   return (
     <section className="library-panel recent-panel">
       <div className="section-title">
         <h2>最近的会议</h2>
-        <a className="recent-all-link" href="/history?tab=meeting">查看全部 <span aria-hidden="true">→</span></a>
+        <Link className="recent-all-link" href="/history?tab=meeting">查看全部 <span aria-hidden="true">→</span></Link>
       </div>
       {meetings.length === 0 ? (
         <div className="empty-library">
@@ -117,7 +120,7 @@ export default function RecentMeetingGrid({
             const deepLink = `/history?tab=meeting&meeting=${item.id}`;
             const openItem = () => {
               if (item.video_id && onOpen) onOpen(item);
-              else window.location.href = deepLink;
+              else router.push(deepLink);
             };
             return (
               <article

@@ -104,7 +104,12 @@ export default function MeetingHomePage() {
         </div>
       </div>
       <Toast message={toast.message} kind={toast.kind} onClose={() => setToast({ message: '' })} />
-      <MeetingWorkbench platforms={platforms} onToast={(message, kind) => setToast({ message, kind })} />
+      <MeetingWorkbench
+        platforms={platforms}
+        templates={templates}
+        templateId={templateId}
+        onToast={(message, kind) => setToast({ message, kind })}
+      />
       <RecentMeetingGrid
         meetings={meetings}
         onOpen={(item) => {
