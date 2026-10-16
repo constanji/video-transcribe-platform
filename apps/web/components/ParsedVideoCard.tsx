@@ -8,6 +8,7 @@ import DownloadAction from './DownloadAction';
 import ImageGallery from './ImageGallery';
 import SummaryAction from './SummaryAction';
 import SummaryProgress from './SummaryProgress';
+import { isUgoira } from '../lib/media-kind';
 
 type AnalyzePanel = 'transcribe' | 'summarize';
 type CardPanel = 'download' | AnalyzePanel | null;
@@ -200,7 +201,7 @@ export default function ParsedVideoCard({
     setSummaryReady((current) => current === ready ? current : ready);
   }, []);
 
-  const images = variants.filter((item) => item.media_type === 'image');
+  const images = variants.filter((item) => item.media_type === 'image' || isUgoira(item));
   const imageMode = !meetingMode && images.length > 0 && !variants.some((item) => item.media_type === 'video' || item.media_type === 'audio');
   if (imageMode && video.id) {
     return (

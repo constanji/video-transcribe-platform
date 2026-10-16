@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { API, apiRaw, logoSrc } from '../lib/api';
 import { withToken } from '../lib/auth';
+import { isUgoira } from '../lib/media-kind';
 import type { MediaVariant, Platform, VideoAsset } from '../lib/types';
 
 function previewSrc(videoId: string, variantId: string) {
@@ -42,15 +43,17 @@ export default function ImageGallery({
   onClose?: () => void;
 }) {
   const [index, setIndex] = useState(0);
-  const [picked, setPicked] = useState<string[]>(() => images.map((item) => item.id));
+  const [picked, setPicked] = useState<string[]>(() => images.filter((item) => item.media_type === 'image').map((item) => item.id));
   const [zoomed, setZoomed] = useState(false);
   const [busy, setBusy] = useState('');
   const current = images[Math.min(index, Math.max(images.length - 1, 0))];
   const multiple = images.length > 1;
+  const zipables = images.filter((item) => item.media_type === 'image');
+  const ugoiraMode = Boolean(current && isUgoira(current));
 
   useEffect(() => {
     setIndex(0);
-    setPicked(images.map((item) => item.id));
+    setPicked(images.filter((item) => item.media_type === 'image').map((item) => item.id));
     setZoomed(false);
   }, [video.id]);
 
@@ -81,8 +84,8 @@ export default function ImageGallery({
     setBusy('current');
     try {
       const response = await apiRaw(`/api/videos/${video.id}/download/${current.id}`);
-      await saveResponse(response, `${video.title || 'image'}.${current.format || 'jpg'}`);
-      onToast('已开始保存当前图片');
+      await saveResponse(response, `${video.title || 'image'}.${isUgoira(current) ? 'gif' : current.format || 'jpg'}`);
+      onToast(ugoiraMode ? '动图已合成为 GIF 并开始保存' : '已开始保存当前图片');
     } catch (err) {
       onToast((err as Error).message, 'error');
     } finally {
@@ -124,8 +127,7 @@ export default function ImageGallery({
       <p className="meta-line">
         {video.author || '作者信息待获取'}
         <i />
-        共 {images.length} 张
-        {multiple && <><i />第 {index + 1} 张</>}
+        {ugoiraMode && !multiple ? '动图 · 下载自动合成 GIF' : <>共 {images.length} 张{multiple && <>第 {index + 1} 张</>}</>}
       </p>
       {video.source_url && (
         <a className="source-link" href={video.source_url} target="_blank" rel="noreferrer">{video.source_url}</a>
@@ -151,14 +153,18 @@ export default function ImageGallery({
       </div>
       <div className="result-actions">
         <button type="button" className="primary-button" onClick={downloadCurrent} disabled={Boolean(busy)}>
-          {busy === 'current' ? '正在准备…' : '下载当前图片'}
+          {busy === 'current' ? (ugoiraMode ? '正在合成…' : '正在准备…') : ugoiraMode ? '下载动图（GIF）' : '下载当前图片'}
         </button>
-        <button type="button" className="outline-button" onClick={() => downloadZip(picked, 'batch')} disabled={Boolean(busy) || picked.length === 0}>
-          {busy === 'batch' ? '正在打包…' : `批量下载（${picked.length}）`}
-        </button>
-        <button type="button" className="outline-button" onClick={() => downloadZip(images.map((item) => item.id), 'all')} disabled={Boolean(busy)}>
-          {busy === 'all' ? '正在打包…' : '全部下载'}
-        </button>
+        {zipables.length > 0 && (
+          <>
+            <button type="button" className="outline-button" onClick={() => downloadZip(picked, 'batch')} disabled={Boolean(busy) || picked.length === 0}>
+              {busy === 'batch' ? '正在打包…' : `批量下载（${picked.length}）`}
+            </button>
+            <button type="button" className="outline-button" onClick={() => downloadZip(zipables.map((item) => item.id), 'all')} disabled={Boolean(busy)}>
+              {busy === 'all' ? '正在打包…' : '全部下载'}
+            </button>
+          </>
+        )}
       </div>
       {zoomed && (
         <div className="image-lightbox" role="dialog" aria-modal="true" aria-label="查看大图" onClick={() => setZoomed(false)}>

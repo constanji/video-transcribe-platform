@@ -1377,6 +1377,15 @@ def _load_variant_bytes(video: VideoAsset, variant: MediaVariant) -> bytes:
         return payload
 
 
+def _is_ugoira(video: VideoAsset, variant: MediaVariant) -> bool:
+    """Pixiv 动图：源文件是 zip 帧包，下载/预览时按需合成为 GIF。"""
+    return (
+        (variant.media_type or "") == "file"
+        and (variant.format or "").lower() == "zip"
+        and (video.platform or video.source_platform) == "pixiv"
+    )
+
+
 def _load_variant_file(video: VideoAsset, variant: MediaVariant, session: Session) -> tuple[Path, bool]:
     if variant.local_path and Path(variant.local_path).exists():
         return Path(variant.local_path), False
@@ -1438,7 +1447,23 @@ def preview_variant(video_id: str, variant_id: str, user: Any = Depends(get_curr
     if not variant or variant.video_asset_id != video_id:
         raise HTTPException(404, "媒体资源不存在")
     if variant.media_type != "image":
-        raise HTTPException(400, "这个文件不是图片")
+        if not _is_ugoira(video, variant):
+            raise HTTPException(400, "这个文件不是图片")
+        # 动图：把 zip 帧包合成为 GIF 再预览，结果缓存在 PREVIEW_DIR。
+        path = PREVIEW_DIR / f"{variant.id}.gif"
+        if not path.exists():
+            source, temporary = _load_variant_file(video, variant, session)
+            try:
+                frames = ((variant.extra_json or {}).get("frames")) or []
+                composed, _ = compose_ugoira(source, frames, TEMP_DIR)
+                composed.replace(path)
+            except Exception as exc:
+                raise HTTPException(502, "动图预览合成失败，请稍后重试") from exc
+            finally:
+                if temporary:
+                    source.unlink(missing_ok=True)
+                session.commit()
+        return FileResponse(path, media_type="image/gif")
     ext = "jpg" if (variant.format or "").lower() == "jpeg" else (variant.format or "jpg").lower()
     path = PREVIEW_DIR / f"{variant.id}.{ext}"
     if not path.exists():
@@ -1469,7 +1494,7 @@ def download_variant(video_id: str, variant_id: str, user: Any = Depends(get_cur
         raise
     # Pixiv 动图：帧包 zip 自动合成为 GIF（有 ffmpeg 时优先 MP4），失败则回退原始 zip。
     output_path, output_ext = path, (variant.format or "mp4")
-    if (variant.media_type or "") == "file" and (variant.format or "").lower() == "zip" and (video.platform or video.source_platform) == "pixiv":
+    if _is_ugoira(video, variant):
         frames = ((variant.extra_json or {}).get("frames")) or []
         try:
             composed, ext = compose_ugoira(path, frames, TEMP_DIR)

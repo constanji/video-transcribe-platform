@@ -40,7 +40,7 @@ async function parseError(response: Response): Promise<Error> {
 }
 
 /** 连接层面失败（含响应体读取中断）统一转成可读文案；AbortError 原样抛出让调用方识别取消。 */
-function wrapNetworkError(error: unknown): Error {
+function wrapNetworkError(error: unknown): never {
   if (error instanceof DOMException && error.name === 'AbortError') throw error;
   if (error instanceof TypeError) throw new Error('无法连接 API 服务，请检查网络或确认本机服务正在运行');
   throw error;

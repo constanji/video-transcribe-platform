@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { logoSrc } from '../lib/api';
 import { withToken } from '../lib/auth';
-import { isImageRecord } from '../lib/media-kind';
+import { isImageRecord, isUgoira } from '../lib/media-kind';
 import { writeWorkbenchDraft } from '../lib/workbench-draft';
 import type { Platform, Template, VideoAsset } from '../lib/types';
 import DownloadAction from './DownloadAction';
@@ -78,7 +78,7 @@ export default function HistoryDetailPanel({
   );
 
   if (isImageRecord(video)) {
-    const images = (video.variants || []).filter((item) => item.media_type === 'image');
+    const images = (video.variants || []).filter((item) => item.media_type === 'image' || isUgoira(item));
     return (
       <>
         <ImageGallery
