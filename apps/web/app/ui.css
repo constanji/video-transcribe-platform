@@ -399,3 +399,4 @@ a.recent-card{text-decoration:none;color:inherit;display:block}
 .timeline-item.deleting{opacity:.55;cursor:progress}
 .timeline-item.deleting .history-thumb{filter:grayscale(1)}
 button.primary-button:disabled{opacity:.6;cursor:progress}
+.platform-badge img{width:16px;height:16px;object-fit:contain;flex:none}

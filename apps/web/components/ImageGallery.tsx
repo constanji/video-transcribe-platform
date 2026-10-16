@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { API, apiRaw, logoSrc } from '../lib/api';
 import { withToken } from '../lib/auth';
 import { isUgoira } from '../lib/media-kind';
@@ -8,6 +8,24 @@ import type { MediaVariant, Platform, VideoAsset } from '../lib/types';
 
 function previewSrc(videoId: string, variantId: string) {
   return withToken(`${API}/api/videos/${videoId}/preview/${variantId}`) || '';
+}
+
+/** 预览图：加载失败自动重试（动图首合成需数秒、或 API 重启瞬间会失败一次），避免停在裂图。 */
+function PreviewImg({ videoId, variantId, alt, onClick }: { videoId: string; variantId: string; alt: string; onClick?: (event: ReactMouseEvent<HTMLImageElement>) => void }) {
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => { setAttempt(0); }, [variantId]);
+  const base = previewSrc(videoId, variantId);
+  const src = attempt > 0 && base ? `${base}&r=${attempt}` : base;
+  return (
+    <img
+      src={src}
+      alt={alt}
+      onClick={onClick}
+      onError={() => {
+        if (base && attempt < 4) window.setTimeout(() => setAttempt((value) => value + 1), 1500 * (attempt + 1));
+      }}
+    />
+  );
 }
 
 async function saveResponse(response: Response, fallback: string) {
@@ -135,7 +153,7 @@ export default function ImageGallery({
       <div className="image-stage">
         {multiple && <button type="button" className="image-nav prev" onClick={() => step(-1)} aria-label="上一张">‹</button>}
         <button type="button" className="image-frame" onClick={() => setZoomed(true)} aria-label="放大查看">
-          <img src={previewSrc(video.id, current.id)} alt={video.title || '图片'} />
+          <PreviewImg videoId={video.id} variantId={current.id} alt={video.title || '图片'} />
         </button>
         {multiple && <button type="button" className="image-nav next" onClick={() => step(1)} aria-label="下一张">›</button>}
       </div>
@@ -146,7 +164,7 @@ export default function ImageGallery({
               <input type="checkbox" checked={picked.includes(item.id)} onChange={() => toggle(item.id)} aria-label={`选择第 ${itemIndex + 1} 张`} />
             </label>
             <button type="button" onClick={() => setIndex(itemIndex)}>
-              <img src={previewSrc(video.id, item.id)} alt="" />
+              <PreviewImg videoId={video.id} variantId={item.id} alt="" />
             </button>
           </div>
         ))}
@@ -169,7 +187,7 @@ export default function ImageGallery({
       {zoomed && (
         <div className="image-lightbox" role="dialog" aria-modal="true" aria-label="查看大图" onClick={() => setZoomed(false)}>
           {multiple && <button type="button" className="image-nav prev" onClick={(event) => { event.stopPropagation(); step(-1); }} aria-label="上一张">‹</button>}
-          <img src={previewSrc(video.id, current.id)} alt={video.title || '图片'} onClick={(event) => event.stopPropagation()} />
+          <PreviewImg videoId={video.id} variantId={current.id} alt={video.title || '图片'} onClick={(event) => event.stopPropagation()} />
           {multiple && <button type="button" className="image-nav next" onClick={(event) => { event.stopPropagation(); step(1); }} aria-label="下一张">›</button>}
           <button type="button" className="image-lightbox-close" onClick={() => setZoomed(false)} aria-label="关闭">×</button>
         </div>
