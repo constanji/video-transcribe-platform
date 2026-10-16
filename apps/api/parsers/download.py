@@ -42,6 +42,7 @@ def download_to_path(
     timeout: float = 120.0,
     retries: int = 0,
     cancel_check: Callable[[], bool] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> Path:
     validate_public_http_url(url)
     if ".m3u8" in url.lower():
@@ -81,6 +82,11 @@ def download_to_path(
                             if received > max_bytes:
                                 raise ParseError(f"媒体文件超过 {max_bytes // (1024 * 1024)} MB 限制")
                             output.write(chunk)
+                            if on_progress:
+                                try:
+                                    on_progress(received, total)
+                                except Exception:
+                                    pass
             if not destination.stat().st_size:
                 raise ParseError("下载的媒体文件为空")
             return destination

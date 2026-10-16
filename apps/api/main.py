@@ -17,7 +17,7 @@ import zipfile
 import base64
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from urllib.parse import quote
 
@@ -1389,7 +1389,14 @@ def _is_ugoira(video: VideoAsset, variant: MediaVariant) -> bool:
     )
 
 
-def _load_variant_file(video: VideoAsset, variant: MediaVariant, session: Session) -> tuple[Path, bool]:
+def _load_variant_file(
+    video: VideoAsset,
+    variant: MediaVariant,
+    session: Session,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> tuple[Path, bool]:
     if variant.local_path and Path(variant.local_path).exists():
         return Path(variant.local_path), False
     if not variant.source_url:
@@ -1403,10 +1410,14 @@ def _load_variant_file(video: VideoAsset, variant: MediaVariant, session: Sessio
             play_url,
             destination,
             referer=cover_referer(play_url, video.source_url),
+            on_progress=on_progress,
+            cancel_check=cancel_check,
             **options,
         ), True
     except Exception:
         destination.unlink(missing_ok=True)
+        if cancel_check is not None and cancel_check():
+            raise
         refreshed = None
         if (video.platform or video.source_platform) == "bilibili" and (video.platform_video_id or "").startswith("BV"):
             refreshed = bili_play_url(video.platform_video_id, variant.quality)
@@ -1426,7 +1437,7 @@ def _load_variant_file(video: VideoAsset, variant: MediaVariant, session: Sessio
         if not refreshed:
             raise HTTPException(502, "下载失败：媒体地址已失效、文件过大或无法访问")
         try:
-            path = download_to_path(refreshed, destination, referer="https://www.bilibili.com/", **options)
+            path = download_to_path(refreshed, destination, referer="https://www.bilibili.com/", on_progress=on_progress, cancel_check=cancel_check, **options)
         except Exception as exc:
             destination.unlink(missing_ok=True)
             raise HTTPException(502, "下载失败：媒体地址已失效、文件过大或无法访问") from exc
@@ -1522,6 +1533,104 @@ def download_variant(video_id: str, variant_id: str, user: Any = Depends(get_cur
         media_type=media_type,
         background=BackgroundTask(output_path.unlink, missing_ok=True) if (temporary or output_path != path) else None,
     )
+
+
+class DownloadJobRequest(BaseModel):
+    variant_id: str
+
+
+def execute_download_job(job_id: str, variant_id: str) -> None:
+    """后台把源站视频拉到本地临时目录，带真实进度；完成后 variant.local_path 指向文件。
+
+    前端轮询本任务进度，completed 后再走既有 GET 下载端点（此时文件已在本地，秒回）。
+    """
+    state = {"last_commit": 0.0, "last_percent": -1}
+
+    def on_progress(received: int, total: int) -> None:
+        now = time.time()
+        percent = round(received / total * 100, 1) if total else None
+        if now - state["last_commit"] < 0.5 and percent == state["last_percent"]:
+            return
+        state["last_commit"] = now
+        state["last_percent"] = percent
+        with SessionLocal() as progress_session:
+            current = progress_session.get(ProcessingJob, job_id)
+            if not current or current.status != "running":
+                return
+            current.progress = (received / total) if total else 0
+            current.progress_json = {
+                **(current.progress_json or {}),
+                "received_bytes": received,
+                "total_bytes": total,
+                "percent": percent,
+            }
+            progress_session.commit()
+
+    with SessionLocal() as session:
+        try:
+            job = session.get(ProcessingJob, job_id)
+            variant = session.get(MediaVariant, variant_id)
+            if not job or not variant:
+                return
+            video = session.get(VideoAsset, job.video_asset_id)
+            if not video:
+                _fail_job(session, job, "视频不存在", "downloading")
+                return
+
+            def cancelled() -> bool:
+                with SessionLocal() as check:
+                    current = check.get(ProcessingJob, job_id)
+                    return current is None or current.status == "cancelled"
+
+            _append_job_log(session, job, "正在从源站获取视频", "info", "downloading", 0.01)
+            path, temporary = _load_variant_file(video, variant, session, on_progress=on_progress, cancel_check=cancelled)
+            if cancelled():
+                path.unlink(missing_ok=True)
+                return
+            # on_progress 用独立会话写进度，这里过期刷新避免用过期快照覆盖 progress_json
+            session.expire_all()
+            job = session.get(ProcessingJob, job_id)
+            variant = session.get(MediaVariant, variant_id)
+            if not job or not variant or job.status == "cancelled":
+                return
+            variant.local_path = str(path)
+            variant.file_size = path.stat().st_size
+            variant.download_status = "downloaded"
+            session.add(variant)
+            _complete_job(session, job, f"视频获取完成（{path.stat().st_size / 1024 / 1024:.1f} MB），开始保存到浏览器")
+        except Exception as exc:  # noqa: BLE001 - 后台线程不能留下永久 running 任务
+            session.rollback()
+            current = session.get(ProcessingJob, job_id)
+            if not current:
+                return
+            if current.status == "cancelled":
+                return
+            _fail_job(session, current, f"视频获取失败：{exc}", "downloading")
+
+
+@app.post("/api/videos/{video_id}/download-jobs")
+def create_download_job(video_id: str, payload: DownloadJobRequest, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
+    """任务化下载：先创建后台任务从源站拉取（带进度），前端轮询完成后再触发浏览器保存。"""
+    video = get_owned_video(session, user, video_id)
+    variant = session.get(MediaVariant, payload.variant_id)
+    if not video or not variant or variant.video_asset_id != video_id:
+        raise HTTPException(404, "媒体资源不存在")
+    if _has_active_job(session, video_id, "download"):
+        raise HTTPException(409, "该视频已有下载任务进行中")
+    now = datetime.now(timezone.utc)
+    job = ProcessingJob(
+        video_asset_id=video_id,
+        job_type="download",
+        status="running",
+        current_stage="downloading",
+        started_at=now,
+        progress_json={"variant_id": variant.id},
+    )
+    session.add(job)
+    video.last_processed_at = now
+    session.commit()
+    threading.Thread(target=execute_download_job, args=(job.id, variant.id), daemon=True, name=f"download-{job.id[:8]}").start()
+    return job_dict(job)
 
 
 @app.post("/api/videos/{video_id}/download-zip")

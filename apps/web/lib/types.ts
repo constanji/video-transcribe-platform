@@ -37,6 +37,8 @@ export type Job = {
     elapsed_seconds?: number;
     audio_seconds?: number | null;
     eta_seconds?: number | null;
+    received_bytes?: number;
+    total_bytes?: number;
   } | null;
 };
 
