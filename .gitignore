@@ -41,6 +41,7 @@ deployment-assets/**/*.gguf
 deployment-assets/server/deploy.env
 deployment-assets/server/*.bundle
 deployment-assets/tools/.remote.env
+deployment-assets/tools/.remote.*.env
 
 # ---- OS / editor ----
 .DS_Store
