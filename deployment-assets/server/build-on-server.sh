@@ -17,6 +17,12 @@ NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
 TORCH_WHEEL_URL="${TORCH_WHEEL_URL:-https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.14.0+cpu-cp311-cp311-manylinux_2_28_x86_64.whl}"
 LLAMA_REPO="${LLAMA_REPO:-https://gitcode.com/gh_mirrors/ll/llama.cpp.git}"
 LLAMA_TAG="${LLAMA_TAG:-}"
+# cpu (default) | cu121 | cu126 | ... — a cuNNN variant builds the GPU moss
+# image (FunASR on CUDA) from the matching PyTorch index. Prefer cu126 or newer
+# on hosts shared with transformers 5.x: cu121 caps torch at 2.5.1 which breaks
+# transformers>=5.6 lazy imports. Takes precedence over TORCH_WHEEL_URL: the
+# default CPU wheel must never override an explicit GPU request.
+TORCH_VARIANT="${TORCH_VARIANT:-cpu}"
 
 [ -f "$SRC/deploy/api.Dockerfile" ] || { echo "source not found at $SRC"; exit 1; }
 
@@ -37,11 +43,16 @@ build_web() {
 }
 
 build_moss() {
-  echo "==> Building moss:${TAG} (llama.cpp from ${LLAMA_REPO} tag='${LLAMA_TAG}')"
+  # Any cuNNN variant wins over the wheel URL: never let the CPU wheel
+  # override an explicit GPU build.
+  local wheel_url="${TORCH_WHEEL_URL}"
+  case "${TORCH_VARIANT}" in cu*) wheel_url="" ;; esac
+  echo "==> Building moss:${TAG} (torch=${TORCH_VARIANT}, llama.cpp from ${LLAMA_REPO} tag='${LLAMA_TAG}')"
   docker build -t "video-platform-moss:${TAG}" \
     --build-arg "APT_MIRROR=${APT_MIRROR}" \
     --build-arg "PIP_INDEX=${PIP_INDEX}" \
-    --build-arg "TORCH_WHEEL_URL=${TORCH_WHEEL_URL}" \
+    --build-arg "TORCH_WHEEL_URL=${wheel_url}" \
+    --build-arg "TORCH_VARIANT=${TORCH_VARIANT}" \
     --build-arg "LLAMA_REPO=${LLAMA_REPO}" \
     --build-arg "LLAMA_TAG=${LLAMA_TAG}" \
     -f "$SRC/deploy/moss.Dockerfile" "$SRC"

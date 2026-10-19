@@ -113,8 +113,14 @@ info "python (win) : $PY_EXE"
 # rewrite the POSIX remote paths (/opt/...) into Windows paths before Python
 # sees them. Giving up that conversion means every *local* path handed to
 # Python must already be in Windows form - hence $PY_EXE / $REMOTE_TOOLS_W.
-r_run() { env MSYS_NO_PATHCONV=1 "$PY_EXE" "$REMOTE_TOOLS_W" exec "$1"; }
-r_cap() { env MSYS_NO_PATHCONV=1 "$PY_EXE" "$REMOTE_TOOLS_W" exec -q "$1"; }
+#
+# R_TIMEOUT (default 3600s) bounds a single remote command. Server-side image
+# builds routinely exceed the exec subcommand's 300s default, and docker build
+# writes to stderr, so remote.py's stdout read would hit the channel timeout
+# long before the build finishes.
+R_TIMEOUT="${R_TIMEOUT:-3600}"
+r_run() { env MSYS_NO_PATHCONV=1 "$PY_EXE" "$REMOTE_TOOLS_W" exec --timeout "$R_TIMEOUT" "$1"; }
+r_cap() { env MSYS_NO_PATHCONV=1 "$PY_EXE" "$REMOTE_TOOLS_W" exec -q --timeout "$R_TIMEOUT" "$1"; }
 r_put() { env MSYS_NO_PATHCONV=1 "$PY_EXE" "$REMOTE_TOOLS_W" put "$(winpath "$1")" "$2" --resume; }
 r_mut() {
   if [ "$DRY_RUN" = "1" ]; then

@@ -28,8 +28,11 @@ ARG PIP_INDEX=https://pypi.org/simple/
 # CPU-only torch wheel. When set, it is fetched with curl (much faster than pip
 # for some mirrors); leave empty to install "torch" from PIP_INDEX.
 ARG TORCH_WHEEL_URL=
-# TORCH_VARIANT=cpu (default) installs plain torch; "cu121" installs the CUDA
-# 12.1 build from the official PyTorch index so FunASR can run on GPU.
+# TORCH_VARIANT=cpu (default) installs plain torch; "cu121"/"cu126"/... installs
+# the CUDA build from the corresponding official PyTorch index so FunASR can run
+# on GPU. Prefer a variant that ships a torch new enough for transformers 5.x
+# (cu121 stops at torch 2.5.1, whose lazy imports break on transformers>=5.6;
+# cu126 ships torch 2.14.x, the version validated with funasr 1.4.16).
 ARG TORCH_VARIANT=cpu
 ENV MOSS_PRELOAD=1
 ENV LLAMA_CLI=/usr/local/bin/llama-cli
@@ -43,8 +46,8 @@ RUN if [ -n "${TORCH_WHEEL_URL}" ]; then \
         && curl -fL --retry 3 --retry-delay 3 -o "$f" "${TORCH_WHEEL_URL}" \
         && pip install --no-cache-dir "$f" \
         && rm -f "$f"; \
-    elif [ "${TORCH_VARIANT}" = "cu121" ]; then \
-        pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121; \
+    elif case "${TORCH_VARIANT}" in cu*) true;; *) false;; esac; then \
+        pip install --no-cache-dir torch --index-url "https://download.pytorch.org/whl/${TORCH_VARIANT}"; \
     else \
         pip install --no-cache-dir -i "${PIP_INDEX}" torch; \
     fi

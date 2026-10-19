@@ -4,6 +4,16 @@
 # Requires NVIDIA driver >= 550 and NVIDIA Container Toolkit on the host.
 # The MOSS runtime image must be built with TORCH_VARIANT=cu121 (see
 # deploy/moss.Dockerfile); the app auto-detects cuda via torch.cuda.is_available().
+#
+# GPU selection: MOSS_GPU_ID pins the container to a single physical GPU
+# (default 0). On a multi-GPU host shared with other workloads, point it at a
+# free card, e.g. MOSS_GPU_ID=1. Inside the container the card is cuda:0.
+
+# NOTE on this host: model-platform-gpu-guard (systemd) kills GPU compute
+# processes whose container is not whitelisted. plugin_parser was added to
+# GPU_GUARD_EXTRA_PROJECT in /usr/local/sbin/model-platform-gpu-guard
+# (2026-10-16) - the compose label hack does NOT work (compose overrides its
+# reserved com.docker.compose.project label), so the guard edit is required.
 
 services:
   moss:
@@ -19,5 +29,5 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              device_ids: ["${MOSS_GPU_ID:-0}"]
               capabilities: [gpu]
