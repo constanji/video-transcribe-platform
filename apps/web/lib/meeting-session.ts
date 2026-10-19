@@ -17,7 +17,7 @@ import { cancelJob, createMeeting, deleteMeeting, getMeeting, meetingWsUrl, retr
 import type { Job, MeetingRecord, MeetingSegment, VideoAsset } from './types';
 
 export type MeetingMode = 'live' | 'recording';
-export type MeetingPhase = 'idle' | 'starting' | 'recording' | 'paused' | 'uploading' | 'stopping' | 'processing' | 'ready';
+export type MeetingPhase = 'idle' | 'starting' | 'recording' | 'paused' | 'uploading' | 'stopping' | 'recorded' | 'processing' | 'ready';
 
 // 单块确认超时 / 重试上限：没有它，任一帧丢失都会永久卡住整条有序队列。
 const MAX_ATTEMPTS = 5;
@@ -524,6 +524,8 @@ class MeetingSessionManager {
       this.captureRef = capture;
       await capture.start();
       this.notify({ meeting: created, phase: 'recording' });
+      // notify 换 phase 后必须同步启停会话定时器，否则 elapsed 计时不会走（电平是独立回调不受影响）。
+      this.syncSessionTimers();
       this.toast(mode === 'live' ? '已开始实时转录' : '已开始录音', 'success');
     } catch (err) {
       this.captureRef = null;
@@ -562,21 +564,15 @@ class MeetingSessionManager {
       this.notify({ uploadProgress: 0 });
       const saved = await uploadMeetingAudio(current.id, file, false, (percent) => this.notify({ uploadProgress: percent }));
       this.notify({ uploadProgress: null, meeting: saved, video: saved.video || this.state.video });
-      // ④ 落盘成功后再单独启动终稿转录。
-      if (this.state.mossReady) {
-        this.notify({ phase: 'processing' });
-        this.syncSessionTimers();
-        const next = await retryTranscribe(current.id);
-        this.notify({ meeting: next, job: next.job || null, video: next.video || this.state.video });
-        this.toast('录音已保存，正在生成终稿转录', 'success');
-      } else {
-        this.notify({
-          failure: '录音已保存，但转录服务未就绪，可稍后点击「重试终稿转录」',
-          phase: 'idle',
-        });
-        this.syncSessionTimers();
-        this.toast(this.state.mossMessage, 'error');
-      }
+      // ④ 停止与转录解耦：落盘后进入 recorded 阶段，等用户确认「开始转录」再启动终稿转录。
+      //    录完不急着转的场景（先补录音、换时间段避开服务繁忙、先补充业务背景）都能停留。
+      this.notify({
+        phase: 'recorded',
+        failure: null,
+        busyHint: '',
+      });
+      this.syncSessionTimers();
+      this.toast('录音已保存，点击「开始转录」生成终稿', 'success');
     } catch (err) {
       // 音频可能已部分落盘；失败时不误报「没保存」，仅提示转写未完成。
       this.notify({ failure: '录音可能未完整保存，请重试录制', phase: 'idle' });
@@ -627,7 +623,7 @@ class MeetingSessionManager {
         phase: 'processing',
       });
       this.syncSessionTimers();
-      this.toast('已重新启动终稿转录', 'success');
+      this.toast('终稿转录已开始', 'success');
     } catch (err) {
       this.toast((err as Error).message, 'error');
     } finally {

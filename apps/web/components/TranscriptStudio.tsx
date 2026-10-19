@@ -7,6 +7,7 @@ import type { Job, Summary, SummarySettings, Template, Transcript, VideoAsset } 
 import { cleanSummaryMarkdown } from '../lib/summary-text';
 import { renderMarkdown } from '../lib/markdown';
 import StudioSelect from './StudioSelect';
+import BusinessContextInput, { readBusinessContext } from './BusinessContextInput';
 
 function Icon({ d, label }: { d: string; label?: string }) {
   return (
@@ -397,7 +398,11 @@ export default function TranscriptStudio({
     try {
       const created = await api<Job>(`/api/videos/${videoId}/summaries`, {
         method: 'POST',
-        body: JSON.stringify({ template_id: activeTemplateId }),
+        body: JSON.stringify({
+          template_id: activeTemplateId,
+          // 业务背景（参会人/公司名/术语）随请求下发，注入总结 prompt 纠正同音错别字。
+          business_context: readBusinessContext(meetingId ? `meeting:${meetingId}` : `video:${videoId}`),
+        }),
       });
       setJob(created);
       onJobChange?.(created);
@@ -624,6 +629,13 @@ export default function TranscriptStudio({
                 onChange={changeTemplate}
               />
             </div>
+            {/* 业务背景补充：生成/重新生成摘要前可填写准确人名、公司名、术语，纠正转写错别字。 */}
+            {transcript && !generating && (
+              <BusinessContextInput
+                storageKey={meetingId ? `meeting:${meetingId}` : `video:${videoId}`}
+                onToast={onToast}
+              />
+            )}
             {generating ? (
               <div className="studio-empty studio-processing">
                 <span className="studio-spinner" />

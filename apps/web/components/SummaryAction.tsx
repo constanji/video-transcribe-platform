@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import type { Job, Template, VideoAsset } from '../lib/types';
+import BusinessContextInput, { readBusinessContext } from './BusinessContextInput';
 import TemplateEditor from './TemplateEditor';
 import TemplatePicker from './TemplatePicker';
 import TranscriptStudio from './TranscriptStudio';
@@ -175,6 +176,7 @@ export default function SummaryAction({
           template_id: templateId,
           reuse_transcript: true,
           transcription: { language: settings.default_language || 'zh' },
+          ...(kind === 'summary' ? { business_context: readBusinessContext(videoId) } : {}),
         }),
       });
       setJob(created);
@@ -203,6 +205,7 @@ export default function SummaryAction({
           onAdd={() => setEditing(true)}
         />
       </div>
+      {showLaunch && <BusinessContextInput storageKey={meetingId || videoId} onToast={onToast} />}
       {showLaunch && (
         <div className="summary-actions">
           {showTranscribe && (

@@ -17,8 +17,8 @@ export default function MeetingFloatingBar() {
   const pathname = usePathname();
   const { phase, elapsed, mode, segments } = state;
 
-  // 会议页有自己的完整工作台，不重复展示；空闲态不显示。
-  if (pathname === '/' || phase === 'idle' || phase === 'starting' || phase === 'ready') return null;
+  // 会议页有自己的完整工作台，不重复展示；空闲/已录完待转录（回会议页操作）不显示。
+  if (pathname === '/' || phase === 'idle' || phase === 'starting' || phase === 'ready' || phase === 'recorded') return null;
 
   const recording = phase === 'recording' || phase === 'paused';
   const statusText =
@@ -45,7 +45,7 @@ export default function MeetingFloatingBar() {
           <button type="button" className="primary" onClick={() => meetingSession.togglePause()}>继续</button>
         ) : null}
         {recording ? (
-          <button type="button" onClick={() => meetingSession.finish()}>停止</button>
+          <button type="button" onClick={() => meetingSession.finish()}>结束录制</button>
         ) : null}
         <Link href="/" className="meeting-dock-back">回到会议 →</Link>
       </span>

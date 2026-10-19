@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { getMeeting, renameMeeting, retryTranscribe } from '../lib/meeting-api';
 import type { MeetingRecord, Template } from '../lib/types';
+import BusinessContextInput, { readBusinessContext } from './BusinessContextInput';
 import SummaryViewer from './SummaryViewer';
 import TranscriptViewer from './TranscriptViewer';
 
@@ -108,7 +109,7 @@ export default function MeetingHistoryDetail({
     try {
       setMeeting(await api<MeetingRecord>(`/api/v1/meetings/${meetingId}/summaries`, {
         method: 'POST',
-        body: JSON.stringify({ template_id: preferred?.id || null }),
+        body: JSON.stringify({ template_id: preferred?.id || null, business_context: readBusinessContext(meetingId) }),
       }));
       setTab('summary');
       onToast('正在生成会议纪要');
@@ -189,13 +190,14 @@ export default function MeetingHistoryDetail({
                 {meeting.status === 'processing' ? '转录中…' : '重试终稿转录'}
               </button>
             )}
-            {transcript && (
-              <button type="button" className="primary-button" disabled={busy || meeting.status === 'summarizing'} onClick={generateSummary}>
-                {meeting.status === 'summarizing' ? '纪要生成中…' : meeting.summary ? '重新生成纪要' : '生成纪要'}
-              </button>
-            )}
-          </div>
+          {transcript && (
+            <button type="button" className="primary-button" disabled={busy || meeting.status === 'summarizing'} onClick={generateSummary}>
+              {meeting.status === 'summarizing' ? '纪要生成中…' : meeting.summary ? '重新生成纪要' : '生成纪要'}
+            </button>
+          )}
         </div>
+        {transcript && <BusinessContextInput storageKey={meetingId} onToast={onToast} />}
+      </div>
       </div>
       <div className="detail-tabs">
         <button type="button" className={tab === 'summary' ? 'active' : ''} onClick={() => setTab('summary')}>纪要</button>

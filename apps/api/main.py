@@ -2194,7 +2194,8 @@ def _run_summary_model(
     })
 
 
-def _wait_summary(session: Session, job: ProcessingJob, settings: dict[str, Any], template: SummaryTemplate | None, transcript: Transcript, title: str) -> tuple[str, str]:
+def _wait_summary(session: Session, job: ProcessingJob, settings: dict[str, Any], template: SummaryTemplate | None, transcript: Transcript, title: str, business_context: str | None = None) -> tuple[str, str]:
+    context_block = _business_context_block(business_context)
     box: dict[str, Any] = {
         "done": False,
         "result": None,
@@ -2215,13 +2216,16 @@ def _wait_summary(session: Session, job: ProcessingJob, settings: dict[str, Any]
             if len(chunks) > 1:
                 for index, chunk in enumerate(chunks, start=1):
                     box["message"] = f"正在提取第 {index}/{len(chunks)} 段的决策与行动项"
-                    prompt = "\n".join([
+                    prompt = "\n".join(filter(None, [
+                        context_block,
                         f"这是会议「{title}」的第 {index}/{len(chunks)} 段转写。",
-                        "提取本段明确出现的事实、议题、结论、分歧、行动项、负责人、截止时间和原始时间戳。",
+                        "提取本段明确出现的事实、议题、结论、分歧、行动项和负责人。",
+                        "要求：保留所有具体名称、数字、报价、配置和方案名；关键结论尽量沿用原话表述；",
+                        "不要输出时间戳和日期；丢弃语气词、寒暄、重复和与议题无关的碎片；",
                         "用紧凑 Markdown 列表输出；未提及的信息不要猜测，不要写套话。",
                         "",
                         chunk,
-                    ])
+                    ]))
                     note, _model = _run_summary_model(settings, prompt, title, max_tokens=768)
                     notes.append(note)
                     box["done_units"] = index
@@ -2248,7 +2252,7 @@ def _wait_summary(session: Session, job: ProcessingJob, settings: dict[str, Any]
             box["message"] = "正在生成最终会议纪要"
             box["result"] = _run_summary_model(
                 settings,
-                _summary_user_prompt(template, source, title),
+                context_block + _summary_user_prompt(template, source, title),
                 title,
                 template,
                 max_tokens=1536,
@@ -2346,9 +2350,14 @@ def _split_summary_text(text: str, limit: int = 4500) -> list[str]:
 def _summary_user_prompt(template: SummaryTemplate | None, text: str, title: str) -> str:
     sections = (template.sections_json if template else None) or [{"title": "摘要", "instruction": "概括主要内容"}]
     lines = [
-        f"请总结「{title}」的转写。按以下章节输出 Markdown；章节列表只是格式要求，直接输出正文，禁止复述说明文字。",
-        "只能依据转写内容；负责人、日期或结论未明确时写“未提及”，禁止推测。",
-        "引用行动项或关键决策时尽量保留输入中的时间戳。",
+        f"请总结「{title}」的转写。按以下章节输出 Markdown；直接输出正文，禁止复述章节说明或写作过程，不要开场白和结尾语。",
+        "",
+        "写作规范：",
+        "- 只依据转写内容，禁止推测；某信息未提及时写「未提及」。",
+        "- 信息密度优先：每条都要带具体内容（名称、数字、报价、配置、方案名、结论），禁止「进行了讨论」「存在一定分歧」「有待进一步沟通」这类无信息量的表述。",
+        "- 人名、公司名、产品名、术语必须与转写一致；若最上方提供了业务背景，以其写法为准并纠正转写中的同音错别字。",
+        "- 行动项负责人只写转写中明确点名的人名，否则写「待定」；截止时间未提及时写「未提及」，禁止把会议标题里的日期当作截止时间或时间戳。",
+        "- 每个章节 3-6 条，按重要性排序；语气词（呃、嗯）、寒暄和设备调试类内容一律丢弃。",
     ]
     for item in sections:
         lines.append(f"## {item.get('title')}\n{item.get('instruction') or ''}")
@@ -2356,7 +2365,19 @@ def _summary_user_prompt(template: SummaryTemplate | None, text: str, title: str
     return "\n".join(lines)
 
 
-def _generate_summary(session: Session, job: ProcessingJob, video: VideoAsset, transcript: Transcript, template_id: str | None) -> None:
+def _business_context_block(business_context: str | None) -> str:
+    """把用户补充的业务背景（参会人、公司名、术语）变成 prompt 前缀，纠正转写错别字。"""
+    text = str(business_context or "").strip()
+    if not text:
+        return ""
+    return "\n".join([
+        "业务背景（以下是正确写法，纪要中的人名、公司名、专有名词必须与之一致，纠正转写中的同音错别字）：",
+        text,
+        "",
+    ])
+
+
+def _generate_summary(session: Session, job: ProcessingJob, video: VideoAsset, transcript: Transcript, template_id: str | None, business_context: str | None = None) -> None:
     settings = merge_settings("transcription", (session.get(ConfigRecord, "transcription") or ConfigRecord(key="transcription", value_json={})).value_json)
     template = session.get(SummaryTemplate, template_id) if template_id else None
     section_titles = [str(item.get("title") or "") for item in ((template.sections_json if template else None) or [{"title": "摘要"}])]
@@ -2370,7 +2391,7 @@ def _generate_summary(session: Session, job: ProcessingJob, video: VideoAsset, t
     })
     provider = str(settings.get("default_provider") or "local")
     try:
-        content, model = _wait_summary(session, job, settings, template, transcript, video.title)
+        content, model = _wait_summary(session, job, settings, template, transcript, video.title, business_context)
         content = clean_summary_text(content, section_titles)
         if not content:
             raise RuntimeError("总结模型没有返回可用结果，请重试")
@@ -2425,7 +2446,7 @@ def execute_transcribe_job(job_id: str, language: str) -> None:
         (TEMP_DIR / f"hls-{job_id}.mp4").unlink(missing_ok=True)
 
 
-def execute_summary_job(job_id: str, template_id: str | None, language: str, reuse_transcript: bool = True) -> None:
+def execute_summary_job(job_id: str, template_id: str | None, language: str, reuse_transcript: bool = True, business_context: str | None = None) -> None:
     try:
         with SessionLocal() as session:
             try:
@@ -2448,7 +2469,7 @@ def execute_summary_job(job_id: str, template_id: str | None, language: str, reu
                 if not job or not video or job.status == "cancelled":
                     return
                 _append_job_log(session, job, "准备生成总结", "info", "summarize_queued", 0.8)
-                _generate_summary(session, job, video, transcript, template_id)
+                _generate_summary(session, job, video, transcript, template_id, business_context)
             except Exception as exc:  # noqa: BLE001 - 保证总结任务一定进入终态
                 session.rollback()
                 current = session.get(ProcessingJob, job_id)
@@ -2486,10 +2507,11 @@ def summary(video_id: str, payload: dict[str, Any] | None = None, user: Any = De
         "language": language,
         "template_id": body.get("template_id"),
         "reuse_transcript": bool(body.get("reuse_transcript", True)),
+        "business_context": str(body.get("business_context") or "") or None,
     })
     threading.Thread(
         target=execute_summary_job,
-        args=(job.id, body.get("template_id"), language, bool(body.get("reuse_transcript", True))),
+        args=(job.id, body.get("template_id"), language, bool(body.get("reuse_transcript", True)), str(body.get("business_context") or "") or None),
         daemon=True,
     ).start()
     return job_dict(job)
@@ -2511,8 +2533,9 @@ def summary_from_transcript(video_id: str, payload: dict[str, Any] | None = None
         "language": language,
         "template_id": body.get("template_id"),
         "reuse_transcript": True,
+        "business_context": str(body.get("business_context") or "") or None,
     })
-    threading.Thread(target=execute_summary_job, args=(job.id, body.get("template_id"), language, True), daemon=True).start()
+    threading.Thread(target=execute_summary_job, args=(job.id, body.get("template_id"), language, True, str(body.get("business_context") or "") or None), daemon=True).start()
     return job_dict(job)
 
 
@@ -2632,11 +2655,12 @@ def retry_job(job_id: str, user: Any = Depends(get_current_user), session: Sessi
             "language": language,
             "template_id": template_id,
             "reuse_transcript": reuse_transcript,
+            "business_context": previous_context.get("business_context"),
             "retry_of": previous.id,
         })
         threading.Thread(
             target=execute_summary_job,
-            args=(created.id, template_id, language, reuse_transcript),
+            args=(created.id, template_id, language, reuse_transcript, previous_context.get("business_context")),
             daemon=True,
         ).start()
     else:

@@ -49,6 +49,7 @@ class CreateApiKeyRequest(BaseModel):
 
 class SummaryMeetingRequest(BaseModel):
     template_id: str | None = None
+    business_context: str | None = None
 
 
 class RenameMeetingRequest(BaseModel):
@@ -303,7 +304,7 @@ def finalize_live_meeting(session: Session, meeting) -> None:
     session.commit()
 
 
-def start_summary(session: Session, meeting, template_id: str | None) -> Any:
+def start_summary(session: Session, meeting, template_id: str | None, business_context: str | None = None) -> Any:
     from .main import _create_media_job, _has_active_job, _latest_transcript, _summary_ready, current_transcription, execute_summary_job
 
     settings = current_transcription()
@@ -327,7 +328,7 @@ def start_summary(session: Session, meeting, template_id: str | None) -> Any:
     from .main import Meeting, ProcessingJob, SessionLocal
 
     def worker() -> None:
-        execute_summary_job(job.id, template_id, meeting.language, True)
+        execute_summary_job(job.id, template_id, meeting.language, True, business_context)
         with SessionLocal() as session_inner:
             current = session_inner.get(Meeting, meeting.id)
             stored = session_inner.get(ProcessingJob, job.id)
@@ -751,7 +752,7 @@ def summarize_meeting(meeting_id: str, payload: SummaryMeetingRequest | None = N
 
     meeting = get_owned_meeting(session, auth, meeting_id)
     body = payload or SummaryMeetingRequest()
-    job = start_summary(session, meeting, body.template_id)
+    job = start_summary(session, meeting, body.template_id, (body.business_context or "").strip() or None)
     session.refresh(meeting)
     result = meeting_dict(session, meeting)
     result["job"] = job_dict(job)

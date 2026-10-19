@@ -112,11 +112,14 @@ export default function MeetingWorkbench({
         {phase === 'paused' && (
           <p className="meeting-hint paused-hint">已暂停 · 暂停期间不采集音频，暂停时长不计入录音时长，点击「继续」接着录</p>
         )}
+        {phase === 'recorded' && (
+          <p className="meeting-hint paused-hint">录音已保存 · 确认无误后点击「开始转录」生成终稿；转录前可先在下方纪要面板补充业务背景</p>
+        )}
         <div className="meeting-actions">
           {phase === 'idle' ? (
             <button type="button" className="primary-button" onClick={() => meetingSession.start()} disabled={!mossReady || busy}>开始</button>
           ) : null}
-          {phase === 'ready' ? (
+          {phase === 'ready' || phase === 'recorded' ? (
             <button type="button" className="outline-button" onClick={() => meetingSession.resetSession()}>新开一场</button>
           ) : null}
           {recording ? (
@@ -126,8 +129,16 @@ export default function MeetingWorkbench({
                 className={phase === 'paused' ? 'primary-button' : 'outline-button'}
                 onClick={() => meetingSession.togglePause()}
               >{phase === 'paused' ? '继续' : '暂停'}</button>
-              <button type="button" className={phase === 'paused' ? 'outline-button' : 'primary-button'} onClick={() => meetingSession.finish()}>停止</button>
+              <button type="button" className={phase === 'paused' ? 'outline-button' : 'primary-button'} onClick={() => meetingSession.finish()}>结束录制</button>
             </>
+          ) : null}
+          {phase === 'recorded' ? (
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => meetingSession.retryFinalTranscript()}
+              disabled={!mossReady || retrying}
+            >{retrying ? '正在启动…' : '开始转录'}</button>
           ) : null}
           {phase === 'starting' ? <button type="button" className="primary-button" disabled>正在启动…</button> : null}
           {phase === 'stopping' ? <button type="button" className="primary-button" disabled>正在保存…</button> : null}

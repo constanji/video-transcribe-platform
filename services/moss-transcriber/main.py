@@ -1191,16 +1191,37 @@ def _strip_instruction_echo(text: str, section_titles: list[str]) -> str:
     return text
 
 
-def _clean_summary(raw: str, section_titles: list[str] | None = None) -> str:
+def _clean_summary(raw: str, section_titles: list[str] | None = None, prompt: str | None = None) -> str:
     original = (raw or "").replace("\r\n", "\n").strip()
     if not original:
         return ""
-    text = _THINK_RE.sub("", _strip_noise_lines(original))
+    text = original
+    # 这版 llama-cli 即使 --log-disable 也会把启动 banner（Loading model/ASCII logo/命令列表）
+    # 和「> 」开头的 prompt 回显打进 stdout，且过长输入的回显会截断成「前 N 字符 ... (truncated)」。
+    # 优先用完整 prompt 匹配回显终点；匹配不上（被截断）时用 prompt 头部 + truncation 标记定位正文起点。
+    if prompt:
+        needle = prompt.replace("\r\n", "\n").strip()
+        idx = text.rfind(needle)
+        if idx >= 0:
+            text = text[idx + len(needle):]
+        else:
+            head = needle[:120]
+            start = text.find(head)
+            if start >= 0:
+                marker = re.search(r"\.{3,}\s*\(truncated\)|…\s*\(truncated\)", text[start:])
+                if marker:
+                    text = text[start + marker.end():]
+                else:
+                    text = text[start + len(head):]
+    if "available commands:" in text:
+        text = text.split("available commands:")[-1]
+    text = _THINK_RE.sub("", _strip_noise_lines(text))
     text = _THINK_RE.sub("", _after_prompt(text)).strip()
     heading = re.search(r"(?m)^(?:##|#)\s+", text)
     if heading:
         text = text[heading.start():].strip()
-    elif re.search(r"(?i)loading model|available commands:|\[start thinking\]|thinking process:", original):
+    elif re.search(r"(?i)loading model|available commands:|\[start thinking\]|thinking process:", text):
+        # 清洗后仍只剩 banner 特征、没有正文，才判定模型没有输出。
         return ""
     if section_titles:
         text = _strip_instruction_echo(text, section_titles)
@@ -1216,8 +1237,9 @@ def summarize(request: SummaryRequest):
     if not _llama_cli_available():
         raise HTTPException(503, f"未找到 llama-cli：{LLAMA_CLI}")
     binary = str(LLAMA_CLI) if Path(LLAMA_CLI).is_file() else (shutil.which(LLAMA_CLI) or LLAMA_CLI)
+    prompt_text = _summary_prompt(request)
     prompt_file = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
-    prompt_file.write(_summary_prompt(request))
+    prompt_file.write(prompt_text)
     prompt_file.close()
     command = [
         binary,
@@ -1259,7 +1281,7 @@ def summarize(request: SummaryRequest):
     if completed.returncode != 0:
         detail = (stderr_text or stdout_text or "llama-cli 失败").strip()[-800:]
         raise HTTPException(500, detail)
-    text = _clean_summary(stdout_text or "", [str(item.get("title") or "") for item in (request.sections or [])])
+    text = _clean_summary(stdout_text or "", [str(item.get("title") or "") for item in (request.sections or [])], prompt_text)
     if not text:
         raise HTTPException(500, "总结模型没有返回内容")
     return {"text": text, "model": SUMMARY_MODEL_PATH.name, "engine": "llama-cli"}
