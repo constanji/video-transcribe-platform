@@ -116,6 +116,13 @@ export default function RecentMeetingGrid({
   onRename?: (item: MeetingHistoryItem, title: string) => void;
 }) {
   const router = useRouter();
+  // 每页两行（3 列 × 2 行 = 6 张），底部翻页。
+  const PAGE_SIZE = 6;
+  const pageCount = Math.max(1, Math.ceil(meetings.length / PAGE_SIZE));
+  const [page, setPage] = useState(0);
+  const safePage = Math.min(page, pageCount - 1);
+  const pageItems = meetings.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
+  const goto = (next: number) => setPage(Math.max(0, Math.min(next, pageCount - 1)));
   return (
     <section className="library-panel recent-panel">
       <div className="section-title">
@@ -129,8 +136,9 @@ export default function RecentMeetingGrid({
           <p>点击上方「开始」录制一场会议，或导入音频文件，记录会显示在这里。</p>
         </div>
       ) : (
-        <div className="recent-grid">
-          {meetings.map((item) => {
+        <>
+          <div className="recent-grid">
+            {pageItems.map((item) => {
             const duration = formatDuration(item.duration_seconds);
             const deepLink = `/history?tab=meeting&meeting=${item.id}`;
             const openItem = () => {
@@ -183,7 +191,15 @@ export default function RecentMeetingGrid({
               </article>
             );
           })}
-        </div>
+          </div>
+          {pageCount > 1 && (
+            <nav className="recent-pager" aria-label="会议列表翻页">
+              <button type="button" disabled={safePage <= 0} onClick={() => goto(safePage - 1)}>‹ 上一页</button>
+              <span>{safePage + 1} / {pageCount}</span>
+              <button type="button" disabled={safePage >= pageCount - 1} onClick={() => goto(safePage + 1)}>下一页 ›</button>
+            </nav>
+          )}
+        </>
       )}
     </section>
   );
