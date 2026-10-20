@@ -84,14 +84,14 @@
 .studio-card{position:relative;width:min(1240px,96vw);height:min(820px,90vh);overflow:visible;border:1px solid #dfe4eb;border-radius:16px;background:#fff;box-shadow:0 24px 80px rgba(18,28,43,.24);display:grid;grid-template-rows:52px minmax(0,1fr)}
 .studio-titlebar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 16px 0 20px;border-bottom:1px solid var(--line);border-radius:16px 16px 0 0;background:#fff}
 .studio-titlebar strong{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.studio-close{width:32px;height:32px;border:0;border-radius:8px;background:transparent;color:#7f8997;font-size:23px;line-height:1;cursor:pointer}
+.studio-close{width:32px;height:32px;border:0;border-radius:10px;background:transparent;color:#7f8997;font-size:23px;line-height:1;cursor:pointer}
 .studio-close:hover{background:#f0f3f7;color:var(--text)}
 .studio-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.75fr);min-height:0;overflow:visible;border-radius:0 0 16px 16px;background:#fff}
 .studio-pane{min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--line);min-height:0;overflow:visible}
 .studio-pane:last-child{border-right:0}
 .studio-pane-toolbar{height:64px;flex:none;display:flex;align-items:center;justify-content:flex-start;gap:10px;padding:0 18px;border-bottom:1px solid var(--line);overflow:visible;position:relative;z-index:5}
 .studio-pane-label{font-size:12px;color:var(--muted)}
-.copy-split{display:flex;border:1px solid #dce2ea;border-radius:11px;background:#fff;position:relative}
+.copy-split{display:flex;border:1px solid #dce2ea;border-radius:10px;background:#fff;position:relative}
 .copy-split>button,.copy-split summary{height:40px;border:0;background:transparent;padding:0 14px;color:#344052;font:inherit;font-size:14px;cursor:pointer}
 .copy-split>button{display:inline-flex;align-items:center;gap:8px;border-right:1px solid #e3e7ed}
 .copy-split details{position:relative}
@@ -105,13 +105,8 @@
    and the two pickers can be wide, so let it wrap instead of overflowing, and
    drop the joined segmented look since the group is no longer one line. */
 .studio-summary-toolbar{flex-wrap:wrap;height:auto;min-height:64px;padding:10px 18px;gap:8px}
-.studio-summary-toolbar .studio-tool{border-radius:10px}
-.studio-summary-toolbar .studio-tool+.studio-tool{margin-left:0}
-.studio-tool{height:42px;flex:none;border:1px solid #dce2ea;background:#fff;color:#344052;border-radius:0;padding:0 16px;font:inherit;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;gap:8px}
+.studio-tool{height:42px;flex:none;border:1px solid #dce2ea;background:#fff;color:#344052;border-radius:10px;padding:0 16px;font:inherit;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;gap:8px}
 .studio-tool svg{width:18px;height:18px;flex:none}
-.studio-tool:first-child{border-radius:12px 0 0 12px}
-.studio-tool:last-child{border-radius:0 12px 12px 0}
-.studio-tool+.studio-tool{margin-left:-1px}
 .studio-tool.active{border-color:#bcd6f5;background:#f1f7ff;color:#186dc8;z-index:1}
 .studio-tool:disabled{cursor:not-allowed;opacity:.65}
 .studio-tool-select{position:relative;padding-right:12px}
