@@ -454,6 +454,9 @@ button.primary-button:disabled{opacity:.6;cursor:progress}
 
 /* 会议卡片悬停预览：转录/纪要开头摘录浮层 */
 .recent-card{position:relative}
+/* 悬停卡片的 transform 会创建堆叠上下文，把浮层 z-index 锁在卡片内部，
+   后续兄弟卡片会盖住浮层——悬停时必须把整张卡片提到最高层。 */
+.recent-card:hover,.recent-card:focus-within{z-index:80}
 .meeting-hover-preview{position:absolute;top:calc(100% + 10px);left:8px;right:8px;z-index:70;display:none;flex-direction:column;gap:10px;padding:14px 16px;border:1px solid #dbe3ec;border-radius:12px;background:#fff;box-shadow:0 16px 40px rgba(18,28,43,.18);pointer-events:none;text-align:left}
 .recent-card:hover .meeting-hover-preview,.recent-card:focus-within .meeting-hover-preview{display:flex}
 .mhp-block{display:flex;flex-direction:column;gap:5px;min-width:0}
