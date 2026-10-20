@@ -1075,9 +1075,27 @@ def _video_detail(video: VideoAsset, session: Session) -> dict[str, Any]:
     jobs = session.scalars(select(ProcessingJob).where(ProcessingJob.video_asset_id == video.id).order_by(ProcessingJob.created_at.desc())).all()
     transcripts = session.scalars(select(Transcript).where(Transcript.video_asset_id == video.id).order_by(Transcript.created_at.desc())).all()
     summaries = session.scalars(select(Summary).where(Summary.video_asset_id == video.id).order_by(Summary.created_at.desc())).all()
+    transcript_items = [{"id": t.id, "model": t.model, "language": t.language, "text": t.text, "segments": t.segments_json, "created_at": t.created_at.isoformat()} for t in transcripts]
+    if not transcript_items:
+        # 实时会议终稿未转录时，把已入库的实时字幕合成一条只读转录，
+        # 否则视频详情（TranscriptStudio 读 video.transcripts）看不到任何结果。
+        meeting = session.scalars(
+            select(Meeting).where(Meeting.video_asset_id == video.id).order_by(Meeting.updated_at.desc())
+        ).first()
+        live_segments = list(meeting.live_segments_json or []) if meeting else []
+        live_text = "\n".join(str(item.get("text") or "") for item in live_segments).strip()
+        if meeting and live_text:
+            transcript_items = [{
+                "id": None,
+                "model": "MOSS-live",
+                "language": meeting.language,
+                "text": live_text,
+                "segments": live_segments,
+                "created_at": (meeting.updated_at or meeting.created_at).isoformat(),
+            }]
     return video_dict(video, session) | {
         "jobs": [job_dict(job) for job in jobs],
-        "transcripts": [{"id": t.id, "model": t.model, "language": t.language, "text": t.text, "segments": t.segments_json, "created_at": t.created_at.isoformat()} for t in transcripts],
+        "transcripts": transcript_items,
         "summaries": [summary_dict(item) for item in summaries],
     }
 

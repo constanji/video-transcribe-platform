@@ -655,6 +655,10 @@ async def upload_meeting_audio(
     variant.download_status = "downloaded"
     meeting.audio_path = str(dest)
     meeting.updated_at = _now()
+    if not transcribe:
+        # 停止/转录解耦：只落盘不转录时进入 recorded 态。
+        # 不改的话状态停在 ws 断开时写的 processing，历史列表会永远显示「转录中」。
+        meeting.status = "recorded"
     session.commit()
     job = None
     if transcribe:

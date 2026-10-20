@@ -203,6 +203,11 @@ export default function TranscriptStudio({
 
   async function saveTranscriptEdit() {
     if (!transcript || savingEdit) return;
+    if (!transcript.id) {
+      // 实时字幕合成的只读转录没有可保存的行：先跑终稿转录再校对。
+      onToast('实时字幕暂不支持校对，请先完成终稿转录', 'error');
+      return;
+    }
     const segments = draftTurns.map((item) => ({ ...item, text: (item.text || '').trim() }));
     const text = segments.map((item) => item.text || '').filter(Boolean).join('\n');
     if (!text) {
@@ -491,7 +496,7 @@ export default function TranscriptStudio({
                   </div>
                 </details>
               </div>
-              {transcript && !editingTranscript ? (
+              {transcript && transcript.id && !editingTranscript ? (
                 <button type="button" className="studio-tool" onClick={beginTranscriptEdit}>校对转录</button>
               ) : editingTranscript ? (
                 <>

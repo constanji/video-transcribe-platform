@@ -8,6 +8,7 @@ import type { MeetingHistoryItem } from '../lib/types';
 const STATUS_LABEL: Record<string, string> = {
   created: '已创建',
   recording: '录音中',
+  recorded: '待转录',
   processing: '转录中',
   summarizing: '总结中',
   ready: '已完成',
