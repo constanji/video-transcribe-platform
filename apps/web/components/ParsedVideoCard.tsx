@@ -9,6 +9,7 @@ import ImageGallery from './ImageGallery';
 import SummaryAction from './SummaryAction';
 import SummaryProgress from './SummaryProgress';
 import { isUgoira } from '../lib/media-kind';
+import AppSelect from './AppSelect';
 
 type AnalyzePanel = 'transcribe' | 'summarize';
 type CardPanel = 'download' | AnalyzePanel | null;
@@ -336,7 +337,7 @@ export default function ParsedVideoCard({
               <DownloadAction video={video} variants={variants} onToast={onToast} />
             </div>
             <div className={`result-panel ${panel === 'transcribe' ? 'is-active' : ''}`}>
-              <label className="transcription-language">转录语言<select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="zh">中文</option><option value="auto">自动识别</option><option value="en">英语</option></select></label>
+              <label className="transcription-language">转录语言<AppSelect ariaLabel="转录语言" value={language} onChange={setLanguage} options={[{ value: 'zh', label: '中文' }, { value: 'auto', label: '自动识别' }, { value: 'en', label: '英语' }]} /></label>
               <SummaryProgress
                 job={transcribeJob}
                 startLabel={transcribeJob?.status === 'failed' || transcribeJob?.status === 'cancelled' ? '重新转录' : '开始转录'}

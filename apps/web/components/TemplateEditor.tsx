@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import type { Template } from '../lib/types';
+import AppSelect from './AppSelect';
 
 type SectionDraft = {
   title: string;
@@ -154,11 +155,7 @@ export default function TemplateEditor({
               </label>
               <label>
                 格式
-                <select value={section.format} onChange={(event) => updateSection(index, { format: event.target.value })}>
-                  <option value="paragraph">段落</option>
-                  <option value="list">列表</option>
-                  <option value="string">单行文本</option>
-                </select>
+                <AppSelect ariaLabel="段落格式" value={section.format} onChange={(value) => updateSection(index, { format: value })} options={[{ value: 'paragraph', label: '段落' }, { value: 'list', label: '列表' }, { value: 'string', label: '单行文本' }]} />
               </label>
             </div>
             <label>

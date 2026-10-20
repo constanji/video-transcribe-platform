@@ -1,5 +1,7 @@
 'use client';
 
+import AppSelect from './AppSelect';
+
 const ADAPTERS = [
   { id: 'bilibili', name: 'B站解析器', extra: ['video_quality'] },
   { id: 'douyin', name: '抖音解析器' },
@@ -84,11 +86,7 @@ export default function ParserSettings({
       <h3 className="subheading">全局解析行为</h3>
       <label className="setting-row">
         <span><strong>日志级别</strong><small>影响解析与下载调试输出</small></span>
-        <select value={data.log_level} onChange={(e) => patch({ log_level: e.target.value })}>
-          <option value="debug">debug</option>
-          <option value="info">info</option>
-          <option value="warning">warning</option>
-        </select>
+        <AppSelect ariaLabel="日志级别" value={data.log_level} onChange={(value) => patch({ log_level: value })} options={[{ value: 'debug', label: 'debug' }, { value: 'info', label: 'info' }, { value: 'warning', label: 'warning' }]} />
       </label>
       <label className="setting-row">
         <span><strong>启用代理</strong><small>需要访问海外平台时打开</small></span>
@@ -175,9 +173,7 @@ export default function ParserSettings({
                     <strong>默认分辨率</strong>
                     <small>高画质可能需要登录 Cookie</small>
                   </span>
-                  <select value={item.video_quality} onChange={(e) => patchParser(adapter.id, { video_quality: e.target.value })}>
-                    {['_360P', '_480P', '_720P', '_1080P', '_4K'].map((q) => <option key={q} value={q}>{q.replace('_', '')}</option>)}
-                  </select>
+                  <AppSelect ariaLabel="默认分辨率" value={item.video_quality} onChange={(value) => patchParser(adapter.id, { video_quality: value })} options={['_360P', '_480P', '_720P', '_1080P', '_4K'].map((q) => ({ value: q, label: q.replace('_', '') }))} />
                 </label>
               )}
               <div className="adapter-footer">

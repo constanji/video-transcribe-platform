@@ -3,6 +3,7 @@
 import { api, apiRaw } from '../lib/api';
 import type { Job, MediaVariant, VideoAsset } from '../lib/types';
 import { useEffect, useRef, useState } from 'react';
+import AppSelect from './AppSelect';
 
 const STATUS: Record<string, string> = {
   available: '可下载',
@@ -151,14 +152,7 @@ export default function DownloadAction({
       <div className="download-row">
         <label>
           清晰度 / 格式
-          <select value={variantId} onChange={(event) => setVariantId(event.target.value)}>
-            {variants.length === 0 && <option value="">暂无可用媒体</option>}
-            {variants.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.quality || '默认清晰度'} · {item.format.toUpperCase()} · {STATUS[item.download_status] || item.download_status}
-              </option>
-            ))}
-          </select>
+          <AppSelect ariaLabel="清晰度 / 格式" value={variantId} onChange={setVariantId} minWidth={280} options={variants.length === 0 ? [{ value: '', label: '暂无可用媒体' }] : variants.map((item) => ({ value: item.id, label: `${item.quality || '默认清晰度'} · ${item.format.toUpperCase()} · ${STATUS[item.download_status] || item.download_status}` }))} />
         </label>
         {busy ? (
           <button type="button" className="outline-button" onClick={cancelDownload}>

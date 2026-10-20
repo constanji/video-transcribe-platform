@@ -9,6 +9,7 @@ import { renderMarkdown } from '../lib/markdown';
 import StudioSelect from './StudioSelect';
 import BusinessContextInput, { readBusinessContext } from './BusinessContextInput';
 import UiIcon from './Icon';
+import AppSelect from './AppSelect';
 
 function Icon({ d, label }: { d: string; label?: string }) {
   return (
@@ -569,17 +570,7 @@ export default function TranscriptStudio({
           <section className={`studio-pane${mobilePane !== 'summary' ? ' mobile-pane-hidden' : ''}`}>
             <div className="studio-pane-toolbar studio-summary-toolbar">
               {(video?.summaries?.length || 0) > 1 && (
-                <select
-                  aria-label="纪要版本"
-                  value={summary?.id || ''}
-                  onChange={(event) => setSelectedSummaryId(event.target.value)}
-                >
-                  {(video?.summaries || []).map((item, index) => (
-                    <option key={item.id} value={item.id}>
-                      版本 {(video?.summaries?.length || 0) - index} · {new Date(item.created_at).toLocaleString('zh-CN')}
-                    </option>
-                  ))}
-                </select>
+                <AppSelect ariaLabel="纪要版本" value={summary?.id || ''} onChange={setSelectedSummaryId} minWidth={240} options={(video?.summaries || []).map((item, index) => ({ value: item.id, label: `版本 ${(video?.summaries?.length || 0) - index} · ${new Date(item.created_at).toLocaleString('zh-CN')}` }))} />
               )}
               {summaryText && !editingSummary ? (
                 <button type="button" className="studio-tool" onClick={beginSummaryEdit}>编辑纪要</button>

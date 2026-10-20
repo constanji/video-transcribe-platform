@@ -469,3 +469,30 @@ button.primary-button:disabled{opacity:.6;cursor:progress}
 .recent-pager button:hover:not(:disabled){border-color:#b8d5f4;background:#f3f8ff}
 .recent-pager button:disabled{cursor:not-allowed;opacity:.5}
 .recent-pager span{font-size:12.5px;color:#5d6b7c;font-variant-numeric:tabular-nums}
+
+/* 全站统一自绘下拉（AppSelect），替代原生 select 的系统弹出列表 */
+.app-select{position:relative;display:inline-block;min-width:0}
+.app-select-trigger{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;border:1px solid #dce2ea;border-radius:10px;background:#fff;color:#344052;font:inherit;font-size:13.5px;cursor:pointer;padding:9px 12px;text-align:left;transition:border-color .16s,background .16s}
+.app-select-trigger:hover:not(:disabled){border-color:#b8d5f4;background:#fcfdff}
+.app-select-trigger:focus-visible{outline:2px solid #c5ddfb;outline-offset:1px}
+.app-select-trigger:disabled{cursor:not-allowed;color:#9aa3af;background:#f7f9fb}
+.app-select-value{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.app-select-caret{width:14px;height:14px;flex:none;color:#8b95a3;transition:transform .16s}
+.app-select.is-open .app-select-caret{transform:rotate(180deg)}
+.app-select-menu{position:absolute;top:calc(100% + 6px);left:0;z-index:90;max-height:264px;overflow:auto;display:flex;flex-direction:column;padding:6px;border:1px solid #dbe3ec;border-radius:12px;background:#fff;box-shadow:0 16px 40px rgba(18,28,43,.16)}
+.app-select-menu.is-right{left:auto;right:0}
+.app-select-menu.is-up{top:auto;bottom:calc(100% + 6px)}
+.app-select-menu button{display:flex;align-items:center;justify-content:space-between;gap:10px;border:0;background:none;border-radius:8px;padding:9px 10px;font:inherit;font-size:13.5px;color:#344052;cursor:pointer;text-align:left;white-space:nowrap}
+.app-select-menu button:hover:not(:disabled),.app-select-menu button:focus-visible{background:#f1f7ff;color:#186dc8;outline:none}
+.app-select-menu button.is-selected{color:#186dc8;font-weight:650}
+.app-select-menu button:disabled{color:#b6bec9;cursor:not-allowed}
+.app-select-check{width:14px;height:14px;flex:none}
+.app-select-empty{margin:0;padding:10px;font-size:12.5px;color:#9aa3af;white-space:nowrap}
+.history-filters .app-select-trigger{border-radius:9px;padding:11px 12px}
+.action-panel .app-select{display:block}
+.meeting-controls .app-select{display:flex}
+.meeting-controls .app-select-trigger{border-radius:8px;padding:9px 10px}
+.meeting-controls .app-select-trigger:disabled{color:#9aa3af}
+.user-table .app-select-trigger{border-radius:8px;padding:7px 9px;font-size:12px}
+.viewer-toolbar .app-select-trigger{border-radius:8px;padding:8px 10px}
+.adapter-field .app-select{width:220px;max-width:100%}

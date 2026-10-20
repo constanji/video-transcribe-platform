@@ -6,6 +6,7 @@ import type { AudioSource } from '../lib/meeting-capture';
 import type { Platform, Template } from '../lib/types';
 import ParsedVideoCard from './ParsedVideoCard';
 import SummaryProgress from './SummaryProgress';
+import AppSelect from './AppSelect';
 
 const ACCEPT = '.mp3,.wav,.m4a,.mp4,.webm,.mov';
 
@@ -86,19 +87,11 @@ export default function MeetingWorkbench({
         <div className="meeting-controls">
           <label>
             音源
-            <select value={source} disabled={locked} onChange={(event) => meetingSession.setSource(event.target.value as AudioSource)}>
-              <option value="mic">麦克风</option>
-              <option value="system">系统音频（屏幕共享）</option>
-              <option value="both">麦克风 + 系统音频</option>
-            </select>
+            <AppSelect ariaLabel="音源" value={source} disabled={locked} onChange={(value) => meetingSession.setSource(value as AudioSource)} options={[{ value: 'mic', label: '麦克风' }, { value: 'system', label: '系统音频（屏幕共享）' }, { value: 'both', label: '麦克风 + 系统音频' }]} />
           </label>
           <label>
             语言
-            <select value={language} disabled={locked} onChange={(event) => meetingSession.setLanguage(event.target.value)}>
-              <option value="zh">中文</option>
-              <option value="auto">自动识别</option>
-              <option value="en">英语</option>
-            </select>
+            <AppSelect ariaLabel="语言" value={language} disabled={locked} onChange={(value) => meetingSession.setLanguage(value)} options={[{ value: 'zh', label: '中文' }, { value: 'auto', label: '自动识别' }, { value: 'en', label: '英语' }]} />
           </label>
           <div className={`meeting-meter${phase === 'paused' ? ' paused' : ''}`}>
             <span>

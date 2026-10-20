@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import type { AuthUser } from '../lib/auth';
 import { useAuth } from '../app/providers';
+import AppSelect from './AppSelect';
 
 type AdminUser = AuthUser & { last_login_at?: string | null; created_at?: string | null };
 
@@ -98,14 +99,7 @@ export default function UserManagement({ onToast }: { onToast: (message: string,
                   <small>@{item.username}{isSelf ? '（当前登录）' : ''}</small>
                 </td>
                 <td>
-                  <select
-                    value={item.role}
-                    disabled={busy || isSelf}
-                    onChange={(event) => update(item, { role: event.target.value })}
-                  >
-                    <option value="admin">管理员</option>
-                    <option value="user">普通用户</option>
-                  </select>
+                  <AppSelect ariaLabel={`调整「${item.username}」的角色`} value={item.role} disabled={busy || isSelf} onChange={(value) => update(item, { role: value })} minWidth={130} options={[{ value: 'admin', label: '管理员' }, { value: 'user', label: '普通用户' }]} />
                 </td>
                 <td>
                   <span className={`user-status ${item.status}`}>{item.status === 'active' ? '正常' : '已禁用'}</span>

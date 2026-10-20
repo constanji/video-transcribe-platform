@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
+import AppSelect from './AppSelect';
 
 type MossHealth = {
   moss_reachable?: boolean;
@@ -114,11 +115,7 @@ export default function TranscriptionSettings({
       <label className="setting-row"><span><strong>默认模型名称</strong></span><input value={data.default_model || ''} onChange={(e) => patch({ default_model: e.target.value })} /></label>
       <label className="setting-row">
         <span><strong>默认语言</strong></span>
-        <select value={data.default_language || 'zh'} onChange={(e) => patch({ default_language: e.target.value })}>
-          <option value="zh">中文</option>
-          <option value="auto">自动识别</option>
-          <option value="en">英语</option>
-        </select>
+        <AppSelect ariaLabel="默认语言" value={data.default_language || 'zh'} onChange={(value) => patch({ default_language: value })} options={[{ value: 'zh', label: '中文' }, { value: 'auto', label: '自动识别' }, { value: 'en', label: '英语' }]} />
       </label>
       <label className="setting-row"><span><strong>音频提取格式</strong></span><input value={data.audio_format || 'wav'} onChange={(e) => patch({ audio_format: e.target.value })} /></label>
       <label className="setting-row"><span><strong>音频采样率</strong></span><input type="number" value={data.sample_rate || 16000} onChange={(e) => patch({ sample_rate: Number(e.target.value) })} /></label>
@@ -128,11 +125,7 @@ export default function TranscriptionSettings({
       <h3 className="subheading">总结配置</h3>
       <label className="setting-row">
         <span><strong>默认 Provider</strong></span>
-        <select value={data.default_provider || 'local'} onChange={(e) => patch({ default_provider: e.target.value })}>
-          <option value="local">内置本地模型</option>
-          <option value="ollama">Ollama</option>
-          <option value="openai">OpenAI 兼容 API</option>
-        </select>
+        <AppSelect ariaLabel="默认 Provider" value={data.default_provider || 'local'} onChange={(value) => patch({ default_provider: value })} options={[{ value: 'local', label: '内置本地模型' }, { value: 'ollama', label: 'Ollama' }, { value: 'openai', label: 'OpenAI 兼容 API' }]} />
       </label>
       <label className="setting-row">
         <span><strong>总结小模型</strong><small>{data.summary_model_found ? '已找到模型文件，本地总结可直接使用' : '未找到 GGUF 模型文件，本地总结不可用；可改用下方远程 Provider'}</small></span>

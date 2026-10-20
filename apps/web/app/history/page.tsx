@@ -11,6 +11,7 @@ import { listMeetings } from '../../lib/meeting-api';
 import { api } from '../../lib/api';
 import { isImageRecord } from '../../lib/media-kind';
 import type { MeetingHistoryItem, Platform, Template, VideoAsset } from '../../lib/types';
+import AppSelect from '../../components/AppSelect';
 
 export default function HistoryPage() {
   // 初始值必须 SSR 安全（window 在服务端预渲染时不存在）；URL 参数在挂载后读取。
@@ -163,23 +164,9 @@ export default function HistoryPage() {
         </div>
         {tab === 'video' && (
           <>
-            <input className="search-input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索标题、作者或平台" />            <select value={platform} onChange={(e) => setPlatform(e.target.value)}>
-              <option value="">全部平台</option>
-              {platforms.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-            </select>
-            <select value={jobType} onChange={(e) => setJobType(e.target.value)}>
-              <option value="">全部任务类型</option>
-              <option value="download">下载</option>
-              <option value="transcribe">转录</option>
-              <option value="summarize">总结</option>
-            </select>
-            <select value={status} onChange={(e) => setStatus(e.target.value)}>
-              <option value="">全部状态</option>
-              <option value="queued">排队</option>
-              <option value="running">进行中</option>
-              <option value="completed">完成</option>
-              <option value="failed">失败</option>
-            </select>
+            <input className="search-input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索标题、作者或平台" />            <AppSelect ariaLabel="平台筛选" value={platform} onChange={setPlatform} options={[{ value: '', label: '全部平台' }, ...platforms.map((item) => ({ value: item.id, label: item.name }))]} />
+            <AppSelect ariaLabel="任务类型筛选" value={jobType} onChange={setJobType} options={[{ value: '', label: '全部任务类型' }, { value: 'download', label: '下载' }, { value: 'transcribe', label: '转录' }, { value: 'summarize', label: '总结' }]} />
+            <AppSelect ariaLabel="状态筛选" value={status} onChange={setStatus} options={[{ value: '', label: '全部状态' }, { value: 'queued', label: '排队' }, { value: 'running', label: '进行中' }, { value: 'completed', label: '完成' }, { value: 'failed', label: '失败' }]} />
             <div className="media-switch" role="tablist" aria-label="解析记录类型">
               {([['all', '全部'], ['video', '视频'], ['image', '图片']] as const).map(([id, label]) => (
                 <button type="button" key={id} className={media === id ? 'active' : ''} onClick={() => setMedia(id)}>{label}</button>

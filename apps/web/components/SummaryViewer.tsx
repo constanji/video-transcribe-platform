@@ -5,6 +5,7 @@ import { api } from '../lib/api';
 import type { Summary, Template } from '../lib/types';
 import { cleanSummaryMarkdown } from '../lib/summary-text';
 import { renderMarkdown } from '../lib/markdown';
+import AppSelect from './AppSelect';
 
 export default function SummaryViewer({
   summaries,
@@ -82,11 +83,7 @@ export default function SummaryViewer({
   return (
     <div className="viewer">
       <div className="viewer-toolbar">
-        <select value={current.id} onChange={(event) => setCurrentId(event.target.value)}>
-          {items.map((item, index) => (
-            <option key={item.id} value={item.id}>版本 {items.length - index} · {new Date(item.created_at).toLocaleString('zh-CN')}</option>
-          ))}
-        </select>
+        <AppSelect ariaLabel="总结版本" value={current.id} onChange={setCurrentId} minWidth={240} options={items.map((item, index) => ({ value: item.id, label: `版本 ${items.length - index} · ${new Date(item.created_at).toLocaleString('zh-CN')}` }))} />
         <button type="button" onClick={copy}>复制总结</button>
         <button type="button" onClick={() => download('md')}>下载 Markdown</button>
         <button type="button" onClick={() => download('txt')}>下载 TXT</button>
