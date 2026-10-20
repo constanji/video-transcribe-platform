@@ -696,6 +696,20 @@ def _worker_main(conn) -> None:
             pass
 
 
+# MOSS-Transcribe-Diarize 原始输出行的头部标签：[0.00][S01][0.52]
+_MOSS_HEADER_RE = re.compile(r"\[\d+(?:\.\d+)?\]\[[Ss]\d+\]\[\d+(?:\.\d+)?\]")
+
+
+def _strip_moss_header(text: str) -> str:
+    """剥掉行首的时间戳/说话人标签；纯噪声块只剩标签没有文字时返回空串。"""
+    lines = []
+    for line in str(text).splitlines():
+        cleaned = _MOSS_HEADER_RE.sub("", line, count=1).strip()
+        if cleaned:
+            lines.append(cleaned)
+    return "\n".join(lines).strip()
+
+
 def _segments_from_funasr(result: Any, fallback_end_ms: float) -> list[dict[str, Any]]:
     if not result:
         return []
@@ -704,7 +718,7 @@ def _segments_from_funasr(result: Any, fallback_end_ms: float) -> list[dict[str,
     if sentence_info:
         segments = []
         for item in sentence_info:
-            text = str(item.get("text", "")).strip()
+            text = _strip_moss_header(str(item.get("text", "")))
             if not text:
                 continue
             start = item.get("start", 0)
@@ -720,8 +734,10 @@ def _segments_from_funasr(result: Any, fallback_end_ms: float) -> list[dict[str,
             })
         if segments:
             return segments
-    text = str(payload.get("text", "")).strip() if isinstance(payload, dict) else str(payload).strip()
+    text = _strip_moss_header(str(payload.get("text", ""))) if isinstance(payload, dict) else str(payload).strip()
     if not text:
+        # 纯静音/噪声块：模型只吐 [0.00][S01][0.50] 头部标签没有文字，
+        # 剥掉标签后为空就整段丢弃，别把标签行当正文返回。
         return []
     return [{"text": text, "start_ms": 0.0, "end_ms": fallback_end_ms, "speaker": None, "is_final": True}]
 

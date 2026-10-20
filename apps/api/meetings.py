@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -925,7 +926,13 @@ async def live_meeting(websocket: WebSocket, meeting_id: str, api_key: str | Non
             except Exception as exc:
                 await websocket.send_json({"type": "error", "seq": seq, "message": str(exc)})
                 continue
-            segments = [item for item in (result.get("segments") or []) if str(item.get("text") or "").strip()]
+            # 防御：MOSS 对纯噪声块可能返回只剩头部标签的文本（如 "[0.00][S01][0.50]"），别当字幕下发。
+            _tag_only = re.compile(r"^(?:\[[^\]\[]*\]\s*)+$")
+            segments = [
+                item
+                for item in (result.get("segments") or [])
+                if str(item.get("text") or "").strip() and not _tag_only.match(str(item.get("text")).strip())
+            ]
             if not segments and str(result.get("text") or "").strip():
                 segments = [{
                     "text": result["text"].strip(),
