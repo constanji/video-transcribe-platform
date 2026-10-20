@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { api } from '../lib/api';
 import { useAuth } from '../app/providers';
+import BrandMark from './BrandMark';
 
 type MossHealth = {
   moss_reachable?: boolean;
@@ -58,7 +59,7 @@ export default function TopBar({ active }: { active: 'meeting' | 'parse' | 'hist
   return (
     <header className="topbar">
       <Link className="brand" href="/">
-        <span className="brand-mark">◈</span>
+        <BrandMark size={31} />
         <span>GooMeeting</span>
       </Link>
       <nav className="nav-tabs">

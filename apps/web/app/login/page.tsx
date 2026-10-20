@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useAuth } from '../providers';
+import BrandMark from '../../components/BrandMark';
 
 export default function LoginPage() {
   const { login, publicConfig } = useAuth();
@@ -37,7 +38,7 @@ export default function LoginPage() {
     <div className="auth-page">
       <form className="auth-card" onSubmit={submit}>
         <div className="auth-brand">
-          <span className="brand-mark">◈</span>
+          <BrandMark size={31} />
           <strong>GooMeeting</strong>
         </div>
         <h1>登录</h1>
