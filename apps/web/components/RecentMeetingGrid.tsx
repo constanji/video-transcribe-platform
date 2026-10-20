@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { MeetingHistoryItem } from '../lib/types';
@@ -35,6 +36,18 @@ function formatDuration(seconds?: number | null) {
 function timeLabel(value?: string | null) {
   if (!value) return '';
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
+}
+
+/**
+ * 预览浮层跟随鼠标进入点显示（写入 CSS 变量 --mhp-top），
+ * 并夹在卡片范围内避免溢出过多。
+ */
+function showPreviewAtCursor(event: ReactMouseEvent<HTMLElement>) {
+  const el = event.currentTarget;
+  const rect = el.getBoundingClientRect();
+  const top = event.clientY - rect.top + 16;
+  const maxTop = rect.height - 180; // 预估浮层最大高度
+  el.style.setProperty('--mhp-top', `${Math.max(10, Math.min(top, Math.max(10, maxTop)))}px`);
 }
 
 function TitleEditor({
@@ -131,6 +144,7 @@ export default function RecentMeetingGrid({
                 role="button"
                 tabIndex={0}
                 onClick={openItem}
+                onMouseEnter={showPreviewAtCursor}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault();
