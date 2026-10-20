@@ -102,7 +102,10 @@ let refreshInFlight: Promise<boolean> | null = null;
 
 function redirectToLogin() {
   if (typeof window === 'undefined') return;
-  if (window.location.pathname.startsWith('/login')) return;
+  // 公开页（登录/注册）不跳转：register 页挂着 AuthProvider 的 fetchMe，
+  // token 失效时若不豁免，用户一进注册页就会被瞬间弹回登录页。
+  const path = window.location.pathname;
+  if (path.startsWith('/login') || path.startsWith('/register')) return;
   const next = `${window.location.pathname}${window.location.search}`;
   window.location.assign(`/login?next=${encodeURIComponent(next)}`);
 }
