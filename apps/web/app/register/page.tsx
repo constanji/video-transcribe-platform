@@ -61,6 +61,12 @@ export default function RegisterPage() {
         <h1>注册</h1>
         {closed ? (
           <p className="auth-hint">注册已关闭，请联系管理员开通账号。</p>
+        ) : publicConfig?.api_unreachable ? (
+          <p className="auth-hint auth-error" style={{ whiteSpace: 'pre-line' }}>
+            无法连接 API 服务，注册暂不可用。
+            {'\n'}最常见原因：API 使用自签 HTTPS 证书而浏览器尚未信任。
+            {'\n'}解决办法：直接访问 https://10.0.0.33:18443 ，点「高级 → 继续前往」接受证书后，用已有账号登录（重复注册同名账号会失败）。
+          </p>
         ) : publicConfig?.first_user ? (
           <p className="auth-hint">你是系统第一位用户，注册后将成为管理员，历史数据会归属到你名下。</p>
         ) : null}

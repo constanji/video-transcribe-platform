@@ -41,7 +41,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     fetchPublicConfig()
       .then(setPublicConfig)
-      .catch(() => setPublicConfig({ first_user: true, registration_open: true }));
+      // 拉取失败 ≠ 系统没有用户：绝不能伪装成 first_user（会误导已注册用户去重复注册）。
+      // 标记 api_unreachable，让登录/注册页展示真实的连接问题与解法。
+      .catch(() => setPublicConfig({ first_user: false, registration_open: true, api_unreachable: true }));
   }, []);
 
   useEffect(() => {

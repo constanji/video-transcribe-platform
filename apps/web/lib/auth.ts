@@ -13,6 +13,8 @@ export type AuthUser = {
 export type PublicConfig = {
   first_user: boolean;
   registration_open: boolean;
+  /** public-config 拉取失败时的兜底标记：API 不可达（常见于自签证书未信任）。 */
+  api_unreachable?: boolean;
 };
 
 const ACCESS_KEY = 'vtp.access_token';
@@ -67,11 +69,23 @@ export function withToken(url?: string | null): string | undefined {
 async function authFetch<T>(path: string, body?: unknown, token?: string | null): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(`${API}${path}`, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API}${path}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (error) {
+    // 网络层失败（DNS/TLS/断网）：fetch 抛 TypeError("Failed to fetch")。
+    // 最常见原因是 API 走自签 HTTPS 而浏览器尚未信任该证书。
+    if (error instanceof TypeError) {
+      throw new Error(
+        `无法连接 API 服务（${API}）。若地址以 https 开头，请先在浏览器直接打开该地址并接受自签证书（高级 → 继续前往），再返回重试。`,
+      );
+    }
+    throw error;
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = (payload as { detail?: unknown }).detail;
