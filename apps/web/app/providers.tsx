@@ -145,7 +145,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       <div className="auth-gate">
         <div className="auth-gate-card">
           <span className="brand-mark">◈</span>
-          <p>正在加载 MediaFlow…</p>
+          <p>正在加载 GooMeeting…</p>
         </div>
       </div>
     );

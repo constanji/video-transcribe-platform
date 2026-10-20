@@ -38,7 +38,7 @@ export default function LoginPage() {
       <form className="auth-card" onSubmit={submit}>
         <div className="auth-brand">
           <span className="brand-mark">◈</span>
-          <strong>MediaFlow</strong>
+          <strong>GooMeeting</strong>
         </div>
         <h1>登录</h1>
         {publicConfig?.first_user ? (

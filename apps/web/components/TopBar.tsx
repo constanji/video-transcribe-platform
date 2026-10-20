@@ -59,7 +59,7 @@ export default function TopBar({ active }: { active: 'meeting' | 'parse' | 'hist
     <header className="topbar">
       <Link className="brand" href="/">
         <span className="brand-mark">◈</span>
-        <span>MediaFlow</span>
+        <span>GooMeeting</span>
       </Link>
       <nav className="nav-tabs">
         {/* 用 next/link 而非 <a>：切页走客户端路由，保住录音中的 MediaStream/WebSocket 等页面外状态。 */}

@@ -56,7 +56,7 @@ export default function RegisterPage() {
       <form className="auth-card" onSubmit={submit}>
         <div className="auth-brand">
           <span className="brand-mark">◈</span>
-          <strong>MediaFlow</strong>
+          <strong>GooMeeting</strong>
         </div>
         <h1>注册</h1>
         {closed ? (
