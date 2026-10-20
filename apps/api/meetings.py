@@ -539,11 +539,12 @@ def list_meetings(request: Request, q: str = "", session: Session = Depends(get_
     for meeting in meetings:
         video = session.get(VideoAsset, meeting.video_asset_id) if meeting.video_asset_id else None
         transcript = _latest_transcript(session, meeting.video_asset_id) if meeting.video_asset_id else None
-        has_summary = False
+        summary = None
         if meeting.video_asset_id:
-            has_summary = session.scalars(
-                select(Summary.id).where(Summary.video_asset_id == meeting.video_asset_id).limit(1)
-            ).first() is not None
+            summary = session.scalars(
+                select(Summary).where(Summary.video_asset_id == meeting.video_asset_id).order_by(Summary.created_at.desc()).limit(1)
+            ).first()
+        has_summary = summary is not None
         live_segments = list(meeting.live_segments_json or [])
         has_transcript = bool((transcript and transcript.text and transcript.text.strip()) or live_segments)
         duration = None
@@ -551,6 +552,11 @@ def list_meetings(request: Request, q: str = "", session: Session = Depends(get_
             duration = video.duration_seconds
         elif transcript is not None and transcript.duration_seconds:
             duration = transcript.duration_seconds
+        # 悬停预览摘录：转录优先终稿正文，缺失时用实时分段拼接；纪要取最新一篇开头。
+        transcript_text = (transcript.text or "").strip() if transcript is not None else ""
+        if not transcript_text and live_segments:
+            transcript_text = " ".join(str(seg.get("text") or "").strip() for seg in live_segments).strip()
+        summary_text = (summary.content_markdown or "").strip() if summary is not None else ""
         items.append(
             {
                 "id": meeting.id,
@@ -563,6 +569,8 @@ def list_meetings(request: Request, q: str = "", session: Session = Depends(get_
                 "duration_seconds": duration,
                 "has_transcript": has_transcript,
                 "has_summary": has_summary,
+                "transcript_preview": transcript_text[:160] or None,
+                "summary_preview": summary_text[:160] or None,
                 "error_message": meeting.error_message,
                 "created_at": meeting.created_at.isoformat(),
                 "updated_at": meeting.updated_at.isoformat(),

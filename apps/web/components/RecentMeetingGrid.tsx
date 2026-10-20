@@ -4,6 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { MeetingHistoryItem } from '../lib/types';
+import MeetingHoverPreview from './MeetingHoverPreview';
 
 const STATUS_LABEL: Record<string, string> = {
   created: '已创建',
@@ -164,6 +165,7 @@ export default function RecentMeetingGrid({
                   <span className={item.has_transcript ? 'flag-on' : 'flag-off'}>{item.has_transcript ? '已有转录' : '无转录'}</span>
                   <span className={item.has_summary ? 'flag-on' : 'flag-off'}>{item.has_summary ? '已有纪要' : '无纪要'}</span>
                 </p>
+                <MeetingHoverPreview item={item} />
               </article>
             );
           })}

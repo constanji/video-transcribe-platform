@@ -451,3 +451,11 @@ button.primary-button:disabled{opacity:.6;cursor:progress}
 .biz-context-preset-list .text-button.danger{color:#c0392b;flex:0 0 auto;font-size:11.5px;opacity:.75}
 .biz-context-preset-list .text-button.danger:hover{opacity:1}
 .biz-context-empty{font-size:11.5px;color:var(--muted);padding:2px 8px}
+
+/* 会议卡片悬停预览：转录/纪要开头摘录浮层 */
+.recent-card{position:relative}
+.meeting-hover-preview{position:absolute;top:calc(100% + 10px);left:8px;right:8px;z-index:70;display:none;flex-direction:column;gap:10px;padding:14px 16px;border:1px solid #dbe3ec;border-radius:12px;background:#fff;box-shadow:0 16px 40px rgba(18,28,43,.18);pointer-events:none;text-align:left}
+.recent-card:hover .meeting-hover-preview,.recent-card:focus-within .meeting-hover-preview{display:flex}
+.mhp-block{display:flex;flex-direction:column;gap:5px;min-width:0}
+.mhp-label{font-style:normal;font-size:11px;font-weight:700;color:#1d68bb;background:var(--accent-soft);border-radius:999px;padding:2px 8px;align-self:flex-start}
+.mhp-text{font-size:12.5px;line-height:1.65;color:#425166;overflow:hidden;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow-wrap:anywhere}

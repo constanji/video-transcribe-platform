@@ -131,6 +131,9 @@ export type MeetingHistoryItem = {
   duration_seconds?: number | null;
   has_transcript: boolean;
   has_summary: boolean;
+  // 列表悬停预览：转录/纪要开头摘录（无内容时为 null）。
+  transcript_preview?: string | null;
+  summary_preview?: string | null;
   error_message?: string | null;
   created_at: string;
   updated_at: string;
