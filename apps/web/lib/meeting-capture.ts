@@ -106,6 +106,17 @@ export class MeetingCapture {
   }
 
   async start() {
+    // getUserMedia/getDisplayMedia 只在安全上下文（HTTPS 或 localhost）存在。
+    // 纯 HTTP + 非 localhost 访问时 navigator.mediaDevices 为 undefined，
+    // 提前拦截并给出可行动的提示，而不是抛 "Cannot read properties of undefined"。
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices) {
+      const origin = typeof window !== 'undefined' ? window.location.origin : '(unknown)';
+      throw new Error(
+        `当前浏览器在 ${origin} 下禁用了麦克风/屏幕采集（浏览器仅允许 HTTPS 或 localhost 页面录音）。` +
+          '解决办法：① 在 Chrome 地址栏输入 chrome://flags/#unsafely-treat-insecure-origin-as-secure，' +
+          `填入 ${origin} 并启用后重启浏览器；② 或让管理员为该站点启用 HTTPS。`
+      );
+    }
     if (this.source === 'mic' || this.source === 'both') this.micStream = await getMicrophone();
     if (this.source === 'system' || this.source === 'both') this.systemStream = await getSystemAudio();
     this.context = new AudioContext();
