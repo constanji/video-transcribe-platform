@@ -40,15 +40,18 @@ function timeLabel(value?: string | null) {
 }
 
 /**
- * 预览浮层跟随鼠标进入点显示（写入 CSS 变量 --mhp-top），
- * 并夹在卡片范围内避免溢出过多。
+ * 预览浮层跟随鼠标进入点显示（写入 CSS 变量 --mhp-top）。
+ * 触发区是封面（.recent-cover），浮层定位在卡片（.recent-card）内，
+ * 因此坐标按卡片 rect 计算，并夹在卡片范围内避免溢出过多。
  */
 function showPreviewAtCursor(event: ReactMouseEvent<HTMLElement>) {
-  const el = event.currentTarget;
-  const rect = el.getBoundingClientRect();
+  const cover = event.currentTarget;
+  const card = cover.closest<HTMLElement>('.recent-card');
+  const ref = card ?? cover;
+  const rect = ref.getBoundingClientRect();
   const top = event.clientY - rect.top + 16;
   const maxTop = rect.height - 180; // 预估浮层最大高度
-  el.style.setProperty('--mhp-top', `${Math.max(10, Math.min(top, Math.max(10, maxTop)))}px`);
+  ref.style.setProperty('--mhp-top', `${Math.max(10, Math.min(top, Math.max(10, maxTop)))}px`);
 }
 
 function TitleEditor({
@@ -153,7 +156,6 @@ export default function RecentMeetingGrid({
                 role="button"
                 tabIndex={0}
                 onClick={openItem}
-                onMouseEnter={showPreviewAtCursor}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault();
@@ -162,7 +164,7 @@ export default function RecentMeetingGrid({
                 }}
                 aria-label={`打开会议「${item.title}」的结果面板`}
               >
-                <div className="recent-cover meeting-cover">
+                <div className="recent-cover meeting-cover" onMouseEnter={showPreviewAtCursor}>
                   <Icon name="wave" size={32} />
                   {item.status === 'recording' && <em className="meeting-cover-badge live">录音中</em>}
                   {item.status === 'processing' && <em className="meeting-cover-badge busy"><i className="badge-dot" />转录中</em>}
