@@ -5,6 +5,7 @@ import { api, logoSrc } from '../lib/api';
 import { withToken } from '../lib/auth';
 import { isImageRecord } from '../lib/media-kind';
 import type { Platform, VideoAsset } from '../lib/types';
+import Icon from './Icon';
 
 type MediaFilter = 'all' | 'video' | 'image';
 
@@ -65,14 +66,14 @@ export default function RecentVideoGrid({
             <button type="button" key={id} className={media === id ? 'active' : ''} onClick={() => switchMedia(id)}>{label}</button>
           ))}
         </div>
-        <a className="recent-all-link" href={historyHref}>查看全部 <span aria-hidden="true">→</span></a>
+        <a className="recent-all-link" href={historyHref}>查看全部 <Icon name="arrow-right" size={14} /></a>
       </div>
       <div className="recent-swap" key={media} data-dir={slideDir}>
         {shown === null ? (
           <div className="empty-library"><strong>正在加载</strong></div>
         ) : shown.length === 0 ? (
         <div className="empty-library">
-          <span>▣</span>
+          <span className="empty-mark"><Icon name="empty" size={28} /></span>
           <strong>{media === 'image' ? '还没有图片解析记录' : media === 'video' ? '还没有视频解析记录' : '还没有解析记录'}</strong>
           <p>粘贴链接并解析后，封面、标题和状态会显示在这里。</p>
         </div>
@@ -89,11 +90,11 @@ export default function RecentVideoGrid({
                 }
               }} aria-label={`打开${video.title}的解析结果`}>
                 <div className="recent-cover">
-                  {video.thumbnail_url ? <img src={withToken(video.thumbnail_url)} alt="" /> : <span>◈</span>}
+                  {video.thumbnail_url ? <img src={withToken(video.thumbnail_url)} alt="" /> : <Icon name="play" size={30} />}
                   <button type="button" className="recent-delete" aria-label={`删除${video.title}`} title="删除解析记录" onClick={(event) => {
                     event.stopPropagation();
                     onDelete(video);
-                  }}>×</button>
+                  }}><Icon name="trash" size={14} /></button>
                 </div>
                 <h3>{video.title}</h3>
                 <p>

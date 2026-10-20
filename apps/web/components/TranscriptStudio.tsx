@@ -8,6 +8,7 @@ import { cleanSummaryMarkdown } from '../lib/summary-text';
 import { renderMarkdown } from '../lib/markdown';
 import StudioSelect from './StudioSelect';
 import BusinessContextInput, { readBusinessContext } from './BusinessContextInput';
+import UiIcon from './Icon';
 
 function Icon({ d, label }: { d: string; label?: string }) {
   return (
@@ -473,7 +474,7 @@ export default function TranscriptStudio({
                 <button type="button" disabled={!summaryText} onClick={() => { closeExportMenu(); exportSummary('preview'); }}>预览文档</button>
               </div>
             </details>
-            <button type="button" className="studio-close" onClick={onClose} aria-label="关闭">×</button>
+            <button type="button" className="studio-close" onClick={onClose} aria-label="关闭"><UiIcon name="close" size={18} /></button>
           </div>
         </header>
         <div className="studio-mobile-tabs" role="tablist" aria-label="结果类型">
@@ -489,7 +490,7 @@ export default function TranscriptStudio({
                   复制
                 </button>
                 <details>
-                  <summary aria-label="复制选项">⌄</summary>
+                  <summary aria-label="复制选项"><UiIcon name="chevron-down" size={14} /></summary>
                   <div className="copy-menu">
                     <button type="button" onClick={() => copyTranscript(false)}>仅复制内容</button>
                     <button type="button" onClick={() => copyTranscript(true)}>复制内容与说话人</button>

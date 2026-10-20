@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { MeetingHistoryItem } from '../lib/types';
 import MeetingHoverPreview from './MeetingHoverPreview';
+import Icon from './Icon';
 
 const STATUS_LABEL: Record<string, string> = {
   created: '已创建',
@@ -75,7 +76,7 @@ function TitleEditor({
               setDraft(item.title);
               setEditing(true);
             }}
-          >✎</button>
+          ><Icon name="pencil" size={13} /></button>
         )}
       </h3>
     );
@@ -127,11 +128,11 @@ export default function RecentMeetingGrid({
     <section className="library-panel recent-panel">
       <div className="section-title">
         <h2>最近的会议</h2>
-        <Link className="recent-all-link" href="/history?tab=meeting">查看全部 <span aria-hidden="true">→</span></Link>
+        <Link className="recent-all-link" href="/history?tab=meeting">查看全部 <Icon name="arrow-right" size={14} /></Link>
       </div>
       {meetings.length === 0 ? (
         <div className="empty-library">
-          <span>◉</span>
+          <span className="empty-mark"><Icon name="empty" size={28} /></span>
           <strong>还没有会议纪要记录</strong>
           <p>点击上方「开始」录制一场会议，或导入音频文件，记录会显示在这里。</p>
         </div>
@@ -162,7 +163,7 @@ export default function RecentMeetingGrid({
                 aria-label={`打开会议「${item.title}」的结果面板`}
               >
                 <div className="recent-cover meeting-cover">
-                  <span>◉</span>
+                  <Icon name="wave" size={32} />
                   {item.status === 'recording' && <em className="meeting-cover-badge live">录音中</em>}
                   {item.status === 'processing' && <em className="meeting-cover-badge busy"><i className="badge-dot" />转录中</em>}
                   {item.status === 'summarizing' && <em className="meeting-cover-badge busy"><i className="badge-dot" />总结中</em>}
@@ -176,7 +177,7 @@ export default function RecentMeetingGrid({
                         event.stopPropagation();
                         onDelete(item);
                       }}
-                    >×</button>
+                    ><Icon name="trash" size={14} /></button>
                   )}
                 </div>
                 <TitleEditor item={item} onRename={onRename} />
@@ -194,9 +195,9 @@ export default function RecentMeetingGrid({
           </div>
           {pageCount > 1 && (
             <nav className="recent-pager" aria-label="会议列表翻页">
-              <button type="button" disabled={safePage <= 0} onClick={() => goto(safePage - 1)}>‹ 上一页</button>
+              <button type="button" disabled={safePage <= 0} onClick={() => goto(safePage - 1)}><Icon name="chevron-left" size={14} /> 上一页</button>
               <span>{safePage + 1} / {pageCount}</span>
-              <button type="button" disabled={safePage >= pageCount - 1} onClick={() => goto(safePage + 1)}>下一页 ›</button>
+              <button type="button" disabled={safePage >= pageCount - 1} onClick={() => goto(safePage + 1)}>下一页 <Icon name="chevron-right" size={14} /></button>
             </nav>
           )}
         </>

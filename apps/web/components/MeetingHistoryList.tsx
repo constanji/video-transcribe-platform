@@ -1,6 +1,7 @@
 'use client';
 
 import type { MeetingHistoryItem } from '../lib/types';
+import Icon from './Icon';
 
 const STATUS_LABEL: Record<string, string> = {
   created: '已创建',
@@ -57,7 +58,7 @@ export default function MeetingHistoryList({
     return (
       <div className="empty-state">
         还没有会议纪要记录
-        <a href="/">去创建一个会议 →</a>
+        <a href="/">去创建一个会议 <Icon name="arrow-right" size={13} /></a>
       </div>
     );
   }
@@ -76,7 +77,7 @@ export default function MeetingHistoryList({
             >
               <span className="timeline-dot" />
               <div className="history-thumb">
-                <span>◈</span>
+                <Icon name="wave" size={22} />
               </div>
               <div className="history-main">
                 <strong className="history-title">{item.title}</strong>

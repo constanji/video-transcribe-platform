@@ -1,5 +1,6 @@
 'use client';
 
+import Icon from './Icon';
 export default function Toast({
   message,
   kind = 'success',
@@ -13,7 +14,7 @@ export default function Toast({
   return (
     <div className={`toast ${kind}`} role="status">
       <span>{kind === 'error' ? `出错：${message}` : message}</span>
-      <button type="button" onClick={onClose} aria-label="关闭提示">×</button>
+      <button type="button" onClick={onClose} aria-label="关闭提示"><Icon name="close" size={16} /></button>
     </div>
   );
 }
