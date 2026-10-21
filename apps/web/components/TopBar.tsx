@@ -59,7 +59,7 @@ export default function TopBar({ active }: { active: 'meeting' | 'parse' | 'hist
   return (
     <header className="topbar">
       <Link className="brand" href="/">
-        <BrandMark size={31} />
+        <BrandMark size={28} />
         <span>GooMeeting</span>
       </Link>
       <nav className="nav-tabs">
