@@ -47,6 +47,7 @@ export type MeetingSessionState = {
   source: AudioSource;
   language: string;
   hotwords: string;
+  hotwordsEnabled: boolean;
   level: number;
   elapsed: number;
   segments: MeetingSegment[];
@@ -69,6 +70,7 @@ const INITIAL_STATE: MeetingSessionState = {
   source: 'mic',
   language: 'zh',
   hotwords: '',
+  hotwordsEnabled: false,
   level: 0,
   elapsed: 0,
   segments: [],
@@ -106,8 +108,36 @@ function persistLastHotwords(value: string) {
   }
 }
 
+// 热词总开关同样跨会话记住：开启状态下热词才随转录请求下发。
+const HOTWORDS_ENABLED_KEY = 'meeting:hotwords-enabled';
+
+function loadHotwordsEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(HOTWORDS_ENABLED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function persistHotwordsEnabled(value: boolean) {
+  try {
+    window.localStorage.setItem(HOTWORDS_ENABLED_KEY, value ? '1' : '0');
+  } catch {
+    // 同上，退化为本会话内存态。
+  }
+}
+
+// 透传给后端的热词：总开关关闭或内容为空时视为未配置。
+function effectiveHotwords(hotwords: string, enabled: boolean): string | undefined {
+  return enabled && hotwords.trim() ? hotwords.trim() : undefined;
+}
+
 class MeetingSessionManager {
-  private state: MeetingSessionState = { ...INITIAL_STATE, hotwords: loadLastHotwords() };
+  private state: MeetingSessionState = {
+    ...INITIAL_STATE,
+    hotwords: loadLastHotwords(),
+    hotwordsEnabled: loadHotwordsEnabled(),
+  };
   private listeners = new Set<() => void>();
   private snapshot: MeetingSessionState = INITIAL_STATE;
 
@@ -299,6 +329,11 @@ class MeetingSessionManager {
     const clipped = hotwords.slice(0, 500);
     persistLastHotwords(clipped);
     this.notify({ hotwords: clipped });
+  }
+
+  setHotwordsEnabled(enabled: boolean) {
+    persistHotwordsEnabled(enabled);
+    this.notify({ hotwordsEnabled: enabled });
   }
 
   togglePause() {
@@ -531,14 +566,14 @@ class MeetingSessionManager {
   // ---- 对外动作 ----
 
   async start() {
-    const { mossReady, mossMessage, mode, language, source, hotwords } = this.state;
+    const { mossReady, mossMessage, mode, language, source, hotwords, hotwordsEnabled } = this.state;
     if (!mossReady) {
       this.toast(mossMessage, 'error');
       return;
     }
     this.notify({ failure: null, phase: 'starting' });
     try {
-      const created = await createMeeting({ mode, language, audio_source: source, hotwords: hotwords.trim() || undefined });
+      const created = await createMeeting({ mode, language, audio_source: source, hotwords: effectiveHotwords(hotwords, hotwordsEnabled) });
       if (mode === 'live') await this.openSocket(created.id);
       const capture = new MeetingCapture(source, mode === 'live', {
         onLevel: (level) => this.notify({ level }),
@@ -674,7 +709,7 @@ class MeetingSessionManager {
         mode: 'recording',
         language: this.state.language,
         audio_source: this.state.source,
-        hotwords: this.state.hotwords.trim() || undefined,
+        hotwords: effectiveHotwords(this.state.hotwords, this.state.hotwordsEnabled),
         title: file.name.replace(/\.[^.]+$/, ''),
       });
       createdId = created.id;

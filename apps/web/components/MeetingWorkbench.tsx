@@ -7,6 +7,7 @@ import type { Platform, Template } from '../lib/types';
 import ParsedVideoCard from './ParsedVideoCard';
 import SummaryProgress from './SummaryProgress';
 import AppSelect from './AppSelect';
+import HotwordControl from './HotwordControl';
 
 const ACCEPT = '.mp3,.wav,.m4a,.mp4,.webm,.mov';
 
@@ -48,7 +49,7 @@ export default function MeetingWorkbench({
 }) {
   const state = useMeetingSession();
   const {
-    mode, phase, source, language, hotwords, level, elapsed, segments, meeting, video, job,
+    mode, phase, source, language, hotwords, hotwordsEnabled, level, elapsed, segments, meeting, video, job,
     busyHint, failure, lagSec, uploadProgress, cancelling, retrying, mossReady, mossMessage,
   } = state;
 
@@ -93,18 +94,10 @@ export default function MeetingWorkbench({
             语言
             <AppSelect ariaLabel="语言" value={language} disabled={locked} onChange={(value) => meetingSession.setLanguage(value)} options={[{ value: 'zh', label: '中文' }, { value: 'auto', label: '自动识别' }, { value: 'en', label: '英语' }]} />
           </label>
-          <label>
-            热词（选填）
-            <input
-              className="meeting-hotwords"
-              value={hotwords}
-              disabled={locked}
-              maxLength={500}
-              placeholder="逗号分隔，如：赵国瑞, 向量数据库"
-              title="转录热词：人名、产品名、术语等，逗号分隔，建议不超过 10 个。可提高这些词的识别准确率"
-              onChange={(event) => meetingSession.setHotwords(event.target.value)}
-            />
-          </label>
+          <div className="hotword-cell">
+            热词
+            <HotwordControl hotwords={hotwords} enabled={hotwordsEnabled} locked={locked} />
+          </div>
           <div className={`meeting-meter${phase === 'paused' ? ' paused' : ''}`}>
             <span>
               {formatClock(elapsed)}
