@@ -42,6 +42,17 @@ class CreateMeetingRequest(BaseModel):
     mode: str = Field(pattern="^(live|recording)$")
     language: str = "zh"
     audio_source: str = Field(default="mic", pattern="^(mic|system|both)$")
+    # 转录热词（逗号/顿号分隔）：ASR 层识别加权，仅本次会议的转录生效（纪要用 business_context）。
+    hotwords: str | None = Field(default=None, max_length=500)
+
+
+def normalize_hotwords(value: str | None) -> str | None:
+    """热词清洗：中英文分隔符归一为逗号，去空段与首尾空白。"""
+    if not value:
+        return None
+    parts = [part.strip() for part in re.split(r"[,，、;；\n\r]+", value)]
+    words = [part for part in parts if part]
+    return ",".join(words)[:500] or None
 
 
 class CreateApiKeyRequest(BaseModel):
@@ -214,6 +225,7 @@ def meeting_dict(session: Session, meeting) -> dict[str, Any]:
         "status": meeting.status,
         "language": meeting.language,
         "audio_source": meeting.audio_source,
+        "hotwords": meeting.hotwords,
         "video_id": meeting.video_asset_id,
         "error_message": meeting.error_message,
         "live_segments": live_segments,
@@ -247,17 +259,17 @@ def start_final_transcribe(session: Session, meeting) -> Any:
     meeting.error_message = None
     meeting.updated_at = _now()
     session.commit()
-    threading_start_final(meeting.id, job.id, meeting.language)
+    threading_start_final(meeting.id, job.id, meeting.language, meeting.hotwords)
     return job
 
 
-def threading_start_final(meeting_id: str, job_id: str, language: str) -> None:
+def threading_start_final(meeting_id: str, job_id: str, language: str, hotwords: str | None = None) -> None:
     import threading
 
     from .main import Meeting, ProcessingJob, SessionLocal, execute_transcribe_job
 
     def worker() -> None:
-        execute_transcribe_job(job_id, language)
+        execute_transcribe_job(job_id, language, hotwords)
         with SessionLocal() as session:
             meeting = session.get(Meeting, meeting_id)
             job = session.get(ProcessingJob, job_id)
@@ -360,7 +372,7 @@ class MossBusy(RuntimeError):
         super().__init__("moss busy")
 
 
-def moss_sync(pcm16: str, sample_rate: int, language: str, offset_ms: float) -> dict[str, Any]:
+def moss_sync(pcm16: str, sample_rate: int, language: str, offset_ms: float, hotwords: str | None = None) -> dict[str, Any]:
     from .main import moss_service_url
 
     url = moss_service_url()
@@ -374,6 +386,7 @@ def moss_sync(pcm16: str, sample_rate: int, language: str, offset_ms: float) -> 
                 "sample_rate": sample_rate,
                 "language": language,
                 "offset_ms": offset_ms,
+                **({"hotwords": hotwords} if hotwords else {}),
             },
         )
     if response.status_code == 503:
@@ -505,6 +518,7 @@ def create_meeting(payload: CreateMeetingRequest, request: Request, session: Ses
         audio_source=payload.audio_source,
         status="created",
         live_segments_json=[],
+        hotwords=normalize_hotwords(payload.hotwords),
         user_id=owner.id if owner else None,
     )
     session.add(meeting)
@@ -870,6 +884,7 @@ async def live_meeting(websocket: WebSocket, meeting_id: str, api_key: str | Non
         meeting.updated_at = _now()
         session.commit()
         language = meeting.language
+        hotwords = (meeting.hotwords or "").strip() or None
         # 已入库的 seq 集合：客户端重连后重发未确认块时用于幂等去重。
         processed = {int(item.get("seq") or 0) for item in (meeting.live_segments_json or [])}
     await websocket.send_json({"type": "ready", "meeting_id": meeting_id})
@@ -930,7 +945,7 @@ async def live_meeting(websocket: WebSocket, meeting_id: str, api_key: str | Non
                 await websocket.send_json({"type": "segment", "seq": seq, "text": "", "segments": []})
                 continue
             try:
-                result = await asyncio.to_thread(moss_sync, pcm16, sample_rate, language, offset_ms)
+                result = await asyncio.to_thread(moss_sync, pcm16, sample_rate, language, offset_ms, hotwords)
             except MossBusy as exc:
                 # 推理锁被长任务占住：让客户端退避重试，而不是卡住整条串行循环。
                 await websocket.send_json({"type": "busy", "seq": seq, "retry_after": exc.retry_after})

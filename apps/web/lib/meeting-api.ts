@@ -15,7 +15,7 @@ export function listMeetings(q?: string) {
   return api<MeetingHistoryItem[]>(`/api/v1/meetings${query}`);
 }
 
-export function createMeeting(body: { title?: string; mode: 'live' | 'recording'; language: string; audio_source: string }) {
+export function createMeeting(body: { title?: string; mode: 'live' | 'recording'; language: string; audio_source: string; hotwords?: string }) {
   return api<MeetingRecord>('/api/v1/meetings', { method: 'POST', body: JSON.stringify(body) });
 }
 

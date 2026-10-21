@@ -249,6 +249,8 @@ class Meeting(Base):
     video_asset_id: Mapped[str | None] = mapped_column(ForeignKey("video_assets.id", ondelete="SET NULL"), nullable=True, index=True)
     api_key_id: Mapped[str | None] = mapped_column(ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True)
     live_segments_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    # 转录热词（逗号分隔）：创建会议时写入，实时块/终稿/重试统一从会议记录读取透传 moss。
+    hotwords: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -317,6 +319,9 @@ with engine.begin() as conn:
             owner_cols = {row[1] for row in conn.execute(text(f"PRAGMA table_info({owner_table})")).fetchall()}
             if "user_id" not in owner_cols:
                 conn.execute(text(f"ALTER TABLE {owner_table} ADD COLUMN user_id VARCHAR(36)"))
+        meeting_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(meetings)")).fetchall()}
+        if "hotwords" not in meeting_cols:
+            conn.execute(text("ALTER TABLE meetings ADD COLUMN hotwords TEXT"))
         for index_name, index_table in (
             ("ix_video_assets_user_id", "video_assets"),
             ("ix_meetings_user_id", "meetings"),
@@ -338,6 +343,7 @@ with engine.begin() as conn:
             "ALTER TABLE summary_templates ADD COLUMN IF NOT EXISTS is_default BOOLEAN DEFAULT FALSE",
             "ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
             "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
+            "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS hotwords TEXT",
             "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
             "CREATE INDEX IF NOT EXISTS ix_video_assets_user_id ON video_assets(user_id)",
             "CREATE INDEX IF NOT EXISTS ix_meetings_user_id ON meetings(user_id)",
@@ -1945,7 +1951,7 @@ def _save_transcript(session: Session, job: ProcessingJob, result: dict[str, Any
     return item
 
 
-def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAsset, language: str) -> Transcript | None:
+def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAsset, language: str, hotwords: str | None = None) -> Transcript | None:
     settings = merge_settings("transcription", (session.get(ConfigRecord, "transcription") or ConfigRecord(key="transcription", value_json={})).value_json)
     moss_url = moss_service_url(settings)
     variants = session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == job.video_asset_id)).all()
@@ -2003,6 +2009,7 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
                         "duration_seconds": video.duration_seconds,
                         "referer": referer,
                         "max_source_bytes": download_options["max_bytes"],
+                        **({"hotwords": hotwords} if hotwords else {}),
                     },
                 )
                 payload = created.json() if created.headers.get("content-type", "").startswith("application/json") else {}
@@ -2438,7 +2445,7 @@ def _generate_summary(session: Session, job: ProcessingJob, video: VideoAsset, t
     _complete_job(session, job, "总结完成")
 
 
-def execute_transcribe_job(job_id: str, language: str) -> None:
+def execute_transcribe_job(job_id: str, language: str, hotwords: str | None = None) -> None:
     try:
         with SessionLocal() as session:
             try:
@@ -2449,7 +2456,7 @@ def execute_transcribe_job(job_id: str, language: str) -> None:
                 if not video:
                     _fail_job(session, job, "视频不存在", "queued")
                     return
-                transcript = _run_moss_transcription(session, job, video, language)
+                transcript = _run_moss_transcription(session, job, video, language, hotwords)
                 if not transcript:
                     return
                 job = session.get(ProcessingJob, job_id)

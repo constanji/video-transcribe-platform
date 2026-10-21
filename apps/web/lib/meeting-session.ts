@@ -46,6 +46,7 @@ export type MeetingSessionState = {
   phase: MeetingPhase;
   source: AudioSource;
   language: string;
+  hotwords: string;
   level: number;
   elapsed: number;
   segments: MeetingSegment[];
@@ -67,6 +68,7 @@ const INITIAL_STATE: MeetingSessionState = {
   phase: 'idle',
   source: 'mic',
   language: 'zh',
+  hotwords: '',
   level: 0,
   elapsed: 0,
   segments: [],
@@ -85,8 +87,27 @@ const INITIAL_STATE: MeetingSessionState = {
 
 type Timer = number | null;
 
+// 热词记住上次使用值：人名/术语往往跨会议复用，免得每场重敲。
+const HOTWORDS_KEY = 'meeting:hotwords';
+
+function loadLastHotwords(): string {
+  try {
+    return window.localStorage.getItem(HOTWORDS_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function persistLastHotwords(value: string) {
+  try {
+    window.localStorage.setItem(HOTWORDS_KEY, value);
+  } catch {
+    // localStorage 不可用时热词仅存活于当前会话。
+  }
+}
+
 class MeetingSessionManager {
-  private state: MeetingSessionState = INITIAL_STATE;
+  private state: MeetingSessionState = { ...INITIAL_STATE, hotwords: loadLastHotwords() };
   private listeners = new Set<() => void>();
   private snapshot: MeetingSessionState = INITIAL_STATE;
 
@@ -272,6 +293,12 @@ class MeetingSessionManager {
 
   setLanguage(language: string) {
     this.notify({ language });
+  }
+
+  setHotwords(hotwords: string) {
+    const clipped = hotwords.slice(0, 500);
+    persistLastHotwords(clipped);
+    this.notify({ hotwords: clipped });
   }
 
   togglePause() {
@@ -504,14 +531,14 @@ class MeetingSessionManager {
   // ---- 对外动作 ----
 
   async start() {
-    const { mossReady, mossMessage, mode, language, source } = this.state;
+    const { mossReady, mossMessage, mode, language, source, hotwords } = this.state;
     if (!mossReady) {
       this.toast(mossMessage, 'error');
       return;
     }
     this.notify({ failure: null, phase: 'starting' });
     try {
-      const created = await createMeeting({ mode, language, audio_source: source });
+      const created = await createMeeting({ mode, language, audio_source: source, hotwords: hotwords.trim() || undefined });
       if (mode === 'live') await this.openSocket(created.id);
       const capture = new MeetingCapture(source, mode === 'live', {
         onLevel: (level) => this.notify({ level }),
@@ -647,6 +674,7 @@ class MeetingSessionManager {
         mode: 'recording',
         language: this.state.language,
         audio_source: this.state.source,
+        hotwords: this.state.hotwords.trim() || undefined,
         title: file.name.replace(/\.[^.]+$/, ''),
       });
       createdId = created.id;
