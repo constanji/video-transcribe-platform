@@ -562,6 +562,9 @@ class TranscriptionRequest(BaseModel):
     max_source_bytes: int | None = None
     # 切片并行参数：不传就用环境变量 MOSS_CHUNK_SECONDS / MOSS_CHUNK_WORKERS。
     chunk_seconds: float | None = None
+    # 热词（逗号/顿号分隔）：经官方 prompt 机制注入识别。2026-10-21 spike 显示 4B
+    # 模型对 prompt 扰动敏感（可能改变整条解码），调用方不传则完全维持基线。
+    hotwords: str | None = None
     chunk_workers: int | None = None
 
 
@@ -580,6 +583,7 @@ class SyncTranscriptionRequest(BaseModel):
     pcm16: str | None = None
     media_path: str | None = None
     offset_ms: float = 0
+    hotwords: str | None = None
 
 
 def _device() -> str:
@@ -743,7 +747,23 @@ def _set_cpu_threads(workers: int) -> None:
         pass
 
 
-def _infer_file(runtime: Any, wav_path: str, audio_seconds: float | None, progress=None, chunk_seconds: float | None = None, chunk_workers: int | None = None, cache_ns: str | None = None) -> tuple[list[dict[str, Any]], bool]:
+def _hotword_prompt(hotwords: str | None) -> str | None:
+    """热词经官方 prompt 机制注入（README「Custom Prompt and Hotwords」）：
+    默认 prompt 末尾追加「热词提示：词1, 词2」。不传/全空返回 None，
+    generate 不带 prompt 参数，与基线逐字一致。"""
+    words = [w.strip() for w in re.split(r"[,，、;；\n]", hotwords or "") if w.strip()]
+    if not words:
+        return None
+    hint = "热词提示：" + ", ".join(words[:50])
+    try:
+        from funasr.models.moss_transcribe_diarize.model import DEFAULT_PROMPT
+
+        return DEFAULT_PROMPT.rstrip() + " " + hint
+    except Exception:  # noqa: BLE001 - 拿不到官方默认 prompt 就只发热词提示
+        return hint
+
+
+def _infer_file(runtime: Any, wav_path: str, audio_seconds: float | None, progress=None, chunk_seconds: float | None = None, chunk_workers: int | None = None, cache_ns: str | None = None, hotwords: str | None = None) -> tuple[list[dict[str, Any]], bool]:
     """返回 (segments, 是否走了切片并行)。
 
     切片并行时说话人标签是「分片内编号」，跨分片不保证同一个代号对应同一个人；
@@ -768,7 +788,11 @@ def _infer_file(runtime: Any, wav_path: str, audio_seconds: float | None, progre
         segments = _chunk_cache_load(key)
         if not isinstance(segments, list):
             if _vad_gate(path):
-                result = runtime.generate(input=path, cache={}, disable_pbar=True, batch_size=1)
+                prompt = _hotword_prompt(hotwords)
+                kwargs = {"input": path, "cache": {}, "disable_pbar": True, "batch_size": 1}
+                if prompt:
+                    kwargs["prompt"] = prompt
+                result = runtime.generate(**kwargs)
                 segments = _segments_from_funasr(result, round(span_ms, 1))
             else:
                 segments = []
@@ -845,6 +869,7 @@ def _worker_main(conn) -> None:
                         command.get("chunk_seconds"),
                         command.get("chunk_workers"),
                         command.get("cache_ns"),
+                        command.get("hotwords"),
                     )
                     conn.send({"event": "done", "segments": segments, "parallel": parallel})
                 except Exception as exc:
@@ -1165,9 +1190,15 @@ def _transcribe(
         chunk_options = {
             "chunk_seconds": request.chunk_seconds,
             "chunk_workers": request.chunk_workers,
+            "hotwords": getattr(request, "hotwords", None),
             # 分块缓存命名空间：模型 + 语言 + 版本。内容寻址已保证同音频同块命中，
-            # 这里再隔离「不同模型/语言」的产物，避免换参后吃到旧结果。
-            "cache_ns": f"v1|{MOSS_MODEL_PATH.name}|{request.language or 'zh'}",
+            # 这里再隔离「不同模型/语言/热词」的产物，避免换参后吃到旧结果。
+            "cache_ns": f"v1|{MOSS_MODEL_PATH.name}|{request.language or 'zh'}"
+            + (
+                f"|hw{hashlib.sha256(request.hotwords.encode('utf-8', 'ignore')).hexdigest()[:8]}"
+                if getattr(request, "hotwords", None)
+                else ""
+            ),
         }
         if fail_fast:
             # 实时同步：限时抢锁，抢不到立刻抛 InferBusy，由客户端排队重试。
@@ -1504,7 +1535,7 @@ def transcribe_sync(request: SyncTranscriptionRequest):
     job = {"id": "sync", "status": "running", "progress": 0, "stage": "queued", "message": "同步转录"}
     try:
         result = _transcribe(
-            TranscriptionRequest(media_path=media_path, language=request.language or "zh"),
+            TranscriptionRequest(media_path=media_path, language=request.language or "zh", hotwords=request.hotwords),
             job,
             fail_fast=True,
             trusted_media_path=bool(request.pcm16),

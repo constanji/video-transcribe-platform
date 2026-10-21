@@ -1,5 +1,14 @@
 # 转写链路增强计划：VAD 前置 + 热词到 ASR 层
 
+> **状态（2026-10-21）**
+> - P1 VAD 前置：✅ 已完成（commit a9c3d74）。energy 门限默认启用，fsmn 已验证可用（`MOSS_VAD=fsmn` 开启）；
+>   统计见 `/health` 的 `vad` 字段（落盘 /cache/vad-stats.json，跨重启累积）。
+> - P2 热词：⚠️ spike 完成——**机制可用（generate(prompt=…) 官方支持）、效果负面**：带热词 prompt
+>   会扰动整条解码（实测「半球/AM值」等词反而消失）。已按「管道就位、默认零影响」落地：
+>   moss 的 SyncTranscriptionRequest/TranscriptionRequest 支持 hotwords 字段，不传则与基线
+>   逐字一致；缓存命名空间含热词指纹自动隔离。**前端/API 暂不接入**，P3 真实会议 A/B 后再定。
+> - P3 效果评估：待做（三场真实会议对比：VAD 拦截率/耗时 + 热词开关 A/B）。
+
 > 目标：对齐豆包 ASR 链路中两个可低成本补齐的能力（预处理 VAD、识别层热词），
 > 降低垃圾识别与同音错字。先做 P1-VAD，验收后再做 P2-热词，之后评估效果再定后续。
 > 基线现状（2026-10-21 核对）：MOSS-Transcribe-Diarize 单模型端到端（ASR+说话人一体），
