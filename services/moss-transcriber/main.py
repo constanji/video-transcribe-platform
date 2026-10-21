@@ -181,6 +181,168 @@ def _chunk_cache_store(key: str | None, segments: list[dict[str, Any]]) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# VAD 前置门禁（P1）：静音/纯噪声块不进主模型。
+#
+# 两级策略，MOSS_VAD 环境变量控制：
+#   off    - 关闭门禁（回退基线行为）
+#   energy - 只做 RMS 能量门限（默认）：整块均方根低于阈值视为静音，直接返回空结果
+#   fsmn   - 能量门限之上再挂 FSMN-VAD（FunASR speech_fsmn_vad_zh-cn-16k-common，
+#            CPU 亚毫秒级）：能量过阈但无语音活动的块（稳态风扇/电流噪声）也拦下
+#
+# 门禁在 _infer_file 的 infer_and_cache 里生效，直播分块与文件分片两条链路统一覆盖；
+# 直播入口 /v1/transcriptions/sync 另有 pcm16 RMS 快速通道，静音块连临时 wav 和推理锁都不碰。
+# 拦截统计暴露在 /health 的 vad 字段，便于验收「拦截块数/总块数」。
+# ---------------------------------------------------------------------------
+
+_VAD_STATS = {"blocked": 0, "passed": 0}
+_vad_model: Any = None
+_vad_model_failed = False
+_vad_model_lock = threading.Lock()
+
+
+def _vad_stats_path() -> Path:
+    # /data 在容器里是只读挂载，统计放与分片缓存同层的容器可写区（/app）。
+    return _chunk_cache_dir().parent / "vad-stats.json"
+
+
+def _vad_stats_record(blocked: bool) -> None:
+    """计数落盘而非仅存进程内存：深度推理跑在 spawn 子进程里，父进程 /health
+    看不到子进程的模块变量；写数据卷还附带跨重启累积的好处。低频写+原子替换。"""
+    try:
+        path = _vad_stats_path()
+        data: dict[str, int] = {}
+        if path.is_file():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        key = "blocked" if blocked else "passed"
+        data[key] = int(data.get(key) or 0) + 1
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name("vad-stats.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 - 统计失败绝不能影响转录
+        pass
+
+
+def _vad_stats_read() -> dict[str, int]:
+    try:
+        path = _vad_stats_path()
+        if path.is_file():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                return {"blocked": int(loaded.get("blocked") or 0), "passed": int(loaded.get("passed") or 0)}
+    except Exception:  # noqa: BLE001
+        pass
+    return dict(_VAD_STATS)
+
+
+def _vad_mode() -> str:
+    return (os.getenv("MOSS_VAD") or "energy").strip().lower()
+
+
+def _vad_rms_threshold() -> float:
+    """pcm16 整块 RMS 门限。经验值：数字静音 <5，环境底噪 20~200，人声通常 >500。
+    默认 80 偏保守（宁可漏放不可误杀），麦克风增益小的部署可用 MOSS_VAD_RMS 调低。"""
+    return _env_float("MOSS_VAD_RMS", 80.0)
+
+
+def _pcm_rms(pcm: bytes) -> float:
+    """裸 pcm16LE 单声道数据的整块 RMS。"""
+    if not pcm:
+        return 0.0
+    try:
+        import numpy as np
+
+        samples = np.frombuffer(pcm[: len(pcm) - len(pcm) % 2], dtype="<i2").astype("float64")
+        return float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
+    except ImportError:
+        import array
+
+        samples = array.array("h")
+        samples.frombytes(pcm[: len(pcm) - len(pcm) % 2])
+        if not samples:
+            return 0.0
+        acc = 0
+        for value in samples:
+            acc += value * value
+        return (acc / len(samples)) ** 0.5
+
+
+def _wav_rms(wav_path: str) -> float:
+    """16kHz wav 文件的整块 RMS。读不出按 -1 处理（门禁放行，不误杀）。"""
+    try:
+        with wave.open(wav_path, "rb") as wav:
+            if wav.getsampwidth() != 2:
+                return -1.0
+            pcm = wav.readframes(wav.getnframes())
+        return _pcm_rms(pcm)
+    except Exception:  # noqa: BLE001 - 门禁绝不能反过来挡住正常转录
+        return -1.0
+
+
+def _load_vad_model() -> Any:
+    """懒加载 FSMN-VAD。模型目录（默认 /app/.vad-model，可用 MOSS_VAD_MODEL_DIR 覆盖；
+    注意 /data 只读，模型别放那边）有文件就离线加载；为空则尝试从 modelscope 拉取，
+    失败置 failed 标志不再重试。"""
+    global _vad_model, _vad_model_failed
+    if _vad_model is not None or _vad_model_failed:
+        return _vad_model
+    with _vad_model_lock:
+        if _vad_model is not None or _vad_model_failed:
+            return _vad_model
+        if not _funasr_available():
+            _vad_model_failed = True
+            return None
+        try:
+            from funasr import AutoModel
+
+            vad_dir = Path(os.getenv("MOSS_VAD_MODEL_DIR") or (Path(__file__).resolve().parent / ".vad-model"))
+            kwargs: dict[str, Any] = {"model": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch", "disable_update": True, "device": "cpu"}
+            if vad_dir.is_dir() and any(vad_dir.iterdir()):
+                kwargs["model_path"] = str(vad_dir)
+            _vad_model = AutoModel(**kwargs)
+            print("[vad] FSMN-VAD loaded from", vad_dir if vad_dir.is_dir() else "modelscope hub", flush=True)
+        except Exception as exc:  # noqa: BLE001 - VAD 挂了退化为 energy-only
+            print(f"[vad] FSMN-VAD load failed, fallback to energy-only: {exc}", flush=True)
+            _vad_model_failed = True
+            _vad_model = None
+        return _vad_model
+
+
+def _wav_has_speech(wav_path: str) -> bool | None:
+    """门禁判定：False=确定是静音/噪声（拦下），True=有人声，None=门禁不确定（放行）。
+    任何异常都返回 None —— 门禁的正确性永远排在算力节省前面。"""
+    mode = _vad_mode()
+    if mode == "off":
+        return None
+    rms = _wav_rms(wav_path)
+    if 0 <= rms < _vad_rms_threshold():
+        return False
+    if mode != "fsmn" or rms < 0:
+        return None
+    model = _load_vad_model()
+    if model is None:
+        return None
+    try:
+        result = model.generate(input=wav_path, cache={}, disable_pbar=True)
+        payload = result[0] if isinstance(result, list) and result else {}
+        spans = payload.get("value") if isinstance(payload, dict) else None
+        return bool(spans)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _vad_gate(path: str) -> bool:
+    """infer_and_cache 用的统一入口：True 表示该块应送主模型。"""
+    if _wav_has_speech(path) is False:
+        _vad_stats_record(True)
+        return False
+    _vad_stats_record(False)
+    return True
+
+
 def _worker_spawn_context():
     return mp.get_context("spawn")
 
@@ -605,8 +767,11 @@ def _infer_file(runtime: Any, wav_path: str, audio_seconds: float | None, progre
         span_ms = max(0.0, (next_offset_seconds - offset_seconds) * 1000)
         segments = _chunk_cache_load(key)
         if not isinstance(segments, list):
-            result = runtime.generate(input=path, cache={}, disable_pbar=True, batch_size=1)
-            segments = _segments_from_funasr(result, round(span_ms, 1))
+            if _vad_gate(path):
+                result = runtime.generate(input=path, cache={}, disable_pbar=True, batch_size=1)
+                segments = _segments_from_funasr(result, round(span_ms, 1))
+            else:
+                segments = []
             _chunk_cache_store(key, segments)
         for item in segments:
             item["start_ms"] = round(float(item.get("start_ms") or 0) + offset_seconds * 1000, 1)
@@ -1093,6 +1258,7 @@ def health():
         "funasr_available": available,
         "funasr_error": None if available else _funasr_error,
         "chunk": {"enabled": _chunk_workers() > 1, "seconds": _chunk_seconds(), "workers": _chunk_workers()},
+        "vad": {"mode": _vad_mode(), "rms_threshold": _vad_rms_threshold(), "fsmn_loaded": _vad_model is not None, **_vad_stats_read()},
         # 本地总结实际是「本服务用 llama-cli 加载 GGUF」跑出来的，所以只有本服务
         # 知道它到底能不能用（API 进程可能跑在宿主机上，看不到容器内的 /models）。
         # 一并上报，平台侧就能直接给出准确结论，不必再靠猜路径。
@@ -1316,6 +1482,18 @@ def transcribe_sync(request: SyncTranscriptionRequest):
             raise HTTPException(400, "pcm16 不是合法的 base64") from exc
         if len(pcm) < 3200:
             return {"text": "", "segments": [], "model": "MOSS-Transcribe-Diarize", "language": request.language or "zh", "audio_seconds": 0}
+        # 直播快速通道：整块低于能量门限直接回空，不写临时 wav、不进推理队列。
+        # 门限读不出（理论不会）就放行走正常链路，宁可多花算力不可丢字。
+        if _vad_mode() != "off" and _pcm_rms(pcm) < _vad_rms_threshold() and _pcm_rms(pcm) >= 0:
+            _vad_stats_record(True)
+            return {
+                "text": "",
+                "segments": [],
+                "model": "MOSS-Transcribe-Diarize",
+                "language": request.language or "zh",
+                "audio_seconds": round(len(pcm) / 2 / max(int(request.sample_rate or 16000), 8000), 2),
+                "vad_blocked": True,
+            }
         handle = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         handle.close()
         _write_pcm16_wav(handle.name, pcm, request.sample_rate)
