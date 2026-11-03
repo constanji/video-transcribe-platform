@@ -436,5 +436,16 @@ async def mcp_lifespan(app):  # noqa: ANN001
 
 
 def mount_asr_mcp(parent_app) -> None:
-    """在主 FastAPI 上挂载 /mcp 端点（main.py 启动时调用一次）。"""
-    parent_app.mount("/mcp", mcp_asgi)
+    """在主 FastAPI 上挂载 /mcp 端点（main.py 启动时调用一次）。
+
+    兼容性兜底：部分 MCP 客户端（如 agent 平台）不跟随 307。挂载点收到的
+    子路径为空（即请求 /mcp 无尾斜杠）时直接归一为 /，避免 Starlette
+    redirect_slashes 发 307 导致这类客户端握手失败。
+    """
+
+    async def _slash_tolerant(scope, receive, send):  # noqa: ANN001
+        if scope.get("type") == "http" and not scope.get("path"):
+            scope = dict(scope, path="/")
+        await mcp_asgi(scope, receive, send)
+
+    parent_app.mount("/mcp", _slash_tolerant)
