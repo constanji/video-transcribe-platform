@@ -2502,20 +2502,27 @@ def _drop_overlap_duplicates(prev_segments: list[dict[str, Any]], curr_segments:
 
 
 def _align_chunk_speakers(prev_segments: list[dict[str, Any]], curr_segments: list[dict[str, Any]], overlap_start_ms: float, overlap_end_ms: float, next_global: int) -> tuple[dict[int, int], int]:
-    """跨块说话人对齐（重叠区文本相似度贪心匹配）。
+    """跨块说话人对齐：重叠区按说话人聚合文本算相似度，贪心一对一匹配。
 
     返回 (块内局部编号 → 全局编号映射, 更新后的 next_global)。
+    局限：重叠窗口内未开口的说话人拿不到锚点，只能分配新标号（已知的简单版局限）。
     """
-    prev_in_overlap = [s for s in prev_segments if s["end_ms"] > overlap_start_ms]
-    curr_in_overlap = [s for s in curr_segments if s["start_ms"] < overlap_end_ms]
+    prev_in_overlap: dict[int, str] = {}
+    for s in prev_segments:
+        if s["end_ms"] > overlap_start_ms:
+            prev_in_overlap[int(s["speaker"])] = prev_in_overlap.get(int(s["speaker"]), "") + str(s["text"])
+    curr_in_overlap: dict[int, str] = {}
+    for s in curr_segments:
+        if s["start_ms"] < overlap_end_ms:
+            curr_in_overlap[int(s["speaker"])] = curr_in_overlap.get(int(s["speaker"]), "") + str(s["text"])
     mapping: dict[int, int] = {}
     used_prev: set[int] = set()
     candidates: list[tuple[float, int, int]] = []
-    for seg in curr_in_overlap:
-        for p in prev_in_overlap:
-            score = _texts_similar(p["text"], seg["text"])
-            if score >= 0.55:
-                candidates.append((score, int(seg["speaker"]), int(p["speaker"])))
+    for local, local_text in curr_in_overlap.items():
+        for glob, glob_text in prev_in_overlap.items():
+            score = _texts_similar(glob_text, local_text)
+            if score >= 0.4:
+                candidates.append((score, local, glob))
     for score, local, glob in sorted(candidates, reverse=True):
         if local in mapping or glob in used_prev:
             continue
