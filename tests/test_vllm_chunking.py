@@ -99,9 +99,9 @@ def test_segments_raw_speaker():
 
 
 def test_chunk_settings_clamped():
-    assert _vllm_chunk_settings({}) == (600, 20, 4)
-    assert _vllm_chunk_settings({"vllm_chunk_minutes": 999}) == (1200, 20, 4)
-    assert _vllm_chunk_settings({"vllm_chunk_concurrency": 99}) == (600, 20, 8)
+    assert _vllm_chunk_settings({}) == (600, 30, 4)
+    assert _vllm_chunk_settings({"vllm_chunk_minutes": 999}) == (1200, 30, 4)
+    assert _vllm_chunk_settings({"vllm_chunk_concurrency": 99}) == (600, 30, 8)
     assert _vllm_chunk_settings({"vllm_chunk_overlap_seconds": -5}) == (600, 0, 4)
 
 

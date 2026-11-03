@@ -2361,7 +2361,7 @@ def _vllm_chunk_settings(settings: dict[str, Any]) -> tuple[int, int, int]:
     """分块参数：(块长秒, 重叠秒, 并发数)。全部来自 transcription settings，带钳制。"""
     minutes = float(settings.get("vllm_chunk_minutes") or 10)
     chunk_seconds = int(min(max(minutes * 60.0, 120.0), 1200.0))  # 2min..20min
-    overlap = int(min(max(float(settings.get("vllm_chunk_overlap_seconds") or 20), 0), 60))
+    overlap = int(min(max(float(settings.get("vllm_chunk_overlap_seconds") or 30), 0), 60))
     concurrency = int(min(max(int(settings.get("vllm_chunk_concurrency") or 4), 1), 8))
     return chunk_seconds, overlap, concurrency
 
@@ -2490,7 +2490,9 @@ def _drop_overlap_duplicates(prev_segments: list[dict[str, Any]], curr_segments:
     for seg in curr_segments:
         if seg["start_ms"] < overlap_end_ms:
             dup = any(
-                abs(p["start_ms"] - seg["start_ms"]) <= 1500 and _texts_similar(p["text"], seg["text"]) >= 0.8
+                abs(p["start_ms"] - seg["start_ms"]) <= 1500
+                and _texts_similar(p["text"], seg["text"]) >= 0.8
+                and p["speaker"] == seg["speaker"]
                 for p in prev_in_overlap
             )
             if dup:
@@ -2643,9 +2645,9 @@ def _run_vllm_transcription(session: Session, job: ProcessingJob, video: VideoAs
             _fail_job(session, job, chunk_error or "部分音频块未完成转录", "transcribing")
             return None
 
-        # 按块序合并：重叠去重 + 跨块说话人对齐。
+        # 按块序合并：先跨块说话人对齐（重叠区里完全相同的锚点段还在），
+        # 再做重叠去重，最后统一转说话人标签。
         merged: list[dict[str, Any]] = []
-        global_of: dict[int, int] = {}
         mapping_notes: list[str] = []
         next_global = 1
         for idx in range(len(chunks)):
@@ -2653,18 +2655,15 @@ def _run_vllm_transcription(session: Session, job: ProcessingJob, video: VideoAs
             if idx == 0:
                 for seg in segs:
                     local = int(seg["speaker"])
-                    global_of.setdefault(local, len(global_of) + 1)
-                aligned = [dict(seg, speaker=global_of[int(seg["speaker"])]) for seg in segs]
-                merged.extend(aligned)
+                    next_global = max(next_global, local + 1)
+                merged.extend(dict(seg, speaker=int(seg["speaker"])) for seg in segs)
                 continue
             offset_ms = chunks[idx][1] * 1000.0
             overlap_start_ms, overlap_end_ms = offset_ms, offset_ms + overlap_seconds * 1000.0
-            prev_merged = merged
-            segs = _drop_overlap_duplicates(prev_merged, segs, overlap_start_ms, overlap_end_ms)
-            mapping, next_global = _align_chunk_speakers(prev_merged, segs, overlap_start_ms, overlap_end_ms, next_global)
+            mapping, next_global = _align_chunk_speakers(merged, segs, overlap_start_ms, overlap_end_ms, next_global)
             mapping_notes.append("、".join(f"S{local}→{_vllm_speaker_label(glob)}" for local, glob in sorted(mapping.items())))
-            for seg in segs:
-                seg["speaker"] = mapping[int(seg["speaker"])]
+            segs = [dict(seg, speaker=mapping[int(seg["speaker"])]) for seg in segs]
+            segs = _drop_overlap_duplicates(merged, segs, overlap_start_ms, overlap_end_ms)
             merged.extend(segs)
         if mapping_notes:
             _append_job_log(session, job, "跨块说话人对齐：" + "；".join(f"块{i + 2} {note}" for i, note in enumerate(mapping_notes)), "info", "transcribing", 0.68)
