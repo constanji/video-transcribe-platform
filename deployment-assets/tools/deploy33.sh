@@ -21,7 +21,7 @@ SERVER_DIR="$(cd "$HERE/../server" && pwd)"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "deploy33: missing $ENV_FILE" >&2
-  echo "  create it with: HOST=... USER=... PASSWORD='...' APP_ROOT=/home/goodeep/jzj" >&2
+  echo "  create it with: HOST=... USER=jyj KEY=/c/Users/金/.ssh/id_ed25519 APP_ROOT=/home/goodeep/jzj" >&2
   exit 1
 fi
 

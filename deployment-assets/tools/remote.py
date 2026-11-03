@@ -13,9 +13,13 @@ Usage:
   python remote.py logs <remote_dir> <env_file> <service> [lines]
 
 Connection settings are resolved in this order (first hit wins):
-  1. environment variables: HOST / USER / PASSWORD / PORT
+  1. environment variables: HOST / USER / PASSWORD / PORT / KEY
   2. a local, git-ignored file next to this script: .remote.env
      (copy .remote.env.example and fill it in)
+
+Auth: if KEY points to an OpenSSH private key file, key auth is used
+(password is then optional and may serve as the sudo password on the
+remote side); otherwise password auth is used as before.
 
 No credentials are hard-coded here on purpose: this file is committed to git.
 """
@@ -50,33 +54,54 @@ HOST = os.environ.get("HOST", "")
 USER = os.environ.get("USER", "root")
 PASSWORD = os.environ.get("PASSWORD", "")
 PORT = int(os.environ.get("PORT", "22"))
+KEY = os.environ.get("KEY", "")
+
+
+def _load_pkey(path):
+    """Load an OpenSSH private key, auto-detecting the algorithm."""
+    last_err = None
+    for cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
+        try:
+            return cls.from_private_key_file(path)
+        except paramiko.PasswordRequiredException as err:
+            sys.exit(f"KEY {path} is passphrase-protected; not supported here ({err})")
+        except paramiko.SSHException as err:
+            last_err = err
+    sys.exit(f"Cannot load private key {path}: {last_err}")
 
 
 def connect():
-    if not HOST or not PASSWORD:
+    if not HOST or (not PASSWORD and not KEY):
         sys.exit(
-            "Missing connection settings: HOST / PASSWORD are not set.\n"
+            "Missing connection settings: HOST and (PASSWORD or KEY) are not set.\n"
             "Export them, or create a git-ignored config file at:\n"
             f"  {_CONF}\n"
             "with contents like:\n"
             "  HOST=<server-ip>\n"
             "  USER=root\n"
-            "  PASSWORD=<secret>\n"
+            "  PASSWORD=<secret>        # password auth\n"
+            "  KEY=/path/to/id_ed25519  # or key auth (takes precedence)\n"
             "  PORT=22"
         )
     cli = paramiko.SSHClient()
     cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    cli.connect(
-        HOST,
+    kwargs = dict(
+        hostname=HOST,
         port=PORT,
         username=USER,
-        password=PASSWORD,
         timeout=20,
         banner_timeout=30,
         auth_timeout=30,
         look_for_keys=False,
         allow_agent=False,
     )
+    if KEY:
+        if not os.path.exists(KEY):
+            sys.exit(f"KEY not found: {KEY}")
+        kwargs["pkey"] = _load_pkey(KEY)
+    else:
+        kwargs["password"] = PASSWORD
+    cli.connect(**kwargs)
     return cli
 
 

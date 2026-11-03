@@ -32,6 +32,7 @@ from starlette.background import BackgroundTask
 from .parser_runtime import ParseError, bili_play_url, cover_referer, download_bytes, download_to_path, parse_media
 from .parsers.ugoira import compose_ugoira
 from .auth import get_current_user, get_current_user_flex, require_admin
+from .mcp_asr import mcp_lifespan, mount_asr_mcp
 from .templates_loader import HOME_DEFAULT_NAMES, find_builtin_template, load_builtin_templates, template_sort_key
 from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Text, create_engine, func, or_, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
@@ -417,7 +418,7 @@ class TemplateRequest(BaseModel):
     is_default: bool | None = None
 
 
-app = FastAPI(title="Video Transcribe Platform API", version="0.1.0")
+app = FastAPI(title="Video Transcribe Platform API", version="0.1.0", lifespan=mcp_lifespan)
 _cors_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 if not _cors_origins:
     # Local development default; deployments must set ALLOWED_ORIGINS.
@@ -430,6 +431,9 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
+
+# MCP ASR 中间层：/mcp 端点面向 goodeep-agent（X-API-Key 认证，见 mcp_asr.py）
+mount_asr_mcp(app)
 
 
 def db_session():
@@ -1784,6 +1788,48 @@ def ensure_moss_available(settings: dict[str, Any] | None = None) -> dict[str, A
     return config
 
 
+def vllm_asr_url(transcription: dict[str, Any] | None = None) -> str:
+    """vLLM 转录池地址（MOSS-Transcribe 的 /v1/audio/transcriptions）。
+
+    33 上容器端口 18110。未配置时返回空串，调用方按「未启用 vLLM 道」处理。
+    """
+    settings = transcription if transcription is not None else current_transcription()
+    return str(os.getenv("VLLM_ASR_URL") or settings.get("vllm_asr_url") or "").rstrip("/")
+
+
+def asr_backend(transcription: dict[str, Any] | None = None) -> str:
+    """转录后端选择：auto（默认，配了 vLLM 走 vLLM、失败回退 moss）/ moss / vllm。"""
+    settings = transcription if transcription is not None else current_transcription()
+    return str(os.getenv("ASR_BACKEND") or settings.get("asr_backend") or "auto").strip().lower()
+
+
+def probe_vllm(url: str) -> dict[str, Any]:
+    try:
+        with httpx.Client(timeout=2.5) as client:
+            response = client.get(f"{url}/health")
+            return {"reachable": response.status_code == 200}
+    except (httpx.RequestError, ValueError):
+        return {"reachable": False}
+
+
+def ensure_asr_available(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    """转录前置检查：按后端选择探测 vLLM 转录池或本机 MOSS（auto 时优先 vLLM）。"""
+    config = settings or current_transcription()
+    backend = asr_backend(config)
+    pool_url = vllm_asr_url(config)
+    if backend == "moss":
+        return ensure_moss_available(config)
+    if backend == "vllm" or (backend == "auto" and pool_url):
+        if not pool_url:
+            raise HTTPException(503, "已指定 vLLM 后端但未配置 VLLM_ASR_URL")
+        if probe_vllm(pool_url).get("reachable"):
+            return config
+        if backend == "vllm":
+            raise HTTPException(503, f"vLLM 转录池不可达：{pool_url}")
+        # auto：vLLM 掉线才落到本机 MOSS 检查
+    return ensure_moss_available(config)
+
+
 @app.delete("/api/jobs/{job_id}")
 def cancel_job(job_id: str, user: Any = Depends(get_current_user), session: Session = Depends(db_session)):
     """取消在途任务：MOSS 侧会 kill 掉推理子进程，立即释放推理锁。"""
@@ -1951,9 +1997,13 @@ def _save_transcript(session: Session, job: ProcessingJob, result: dict[str, Any
     return item
 
 
-def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAsset, language: str, hotwords: str | None = None) -> Transcript | None:
-    settings = merge_settings("transcription", (session.get(ConfigRecord, "transcription") or ConfigRecord(key="transcription", value_json={})).value_json)
-    moss_url = moss_service_url(settings)
+def _resolve_transcribe_media(session: Session, job: ProcessingJob, video: VideoAsset) -> dict[str, Any] | None:
+    """为转录挑选最佳可播媒体并就位到本地。
+
+    返回 {"host_path", "media_url", "referer", "download_options"}；
+    没有可用媒体时已写失败日志并返回 None；用户取消时返回 {"cancelled": True}。
+    moss 道用 path_for_moss(host_path) 换算容器内路径，vLLM 道直接读 host_path。
+    """
     variants = session.scalars(select(MediaVariant).where(MediaVariant.video_asset_id == job.video_asset_id)).all()
     playable = [
         item for item in variants
@@ -1976,8 +2026,8 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
         return None
     label = media.quality or media.format or "媒体文件"
     _append_job_log(session, job, f"找到媒体：{label}", "info", "extracting_audio", 0.16)
-    local_media_path = path_for_moss(media.local_path) if media.local_path and Path(media.local_path).exists() else None
-    media_url = None if local_media_path else media.source_url
+    host_path = str(Path(media.local_path)) if media.local_path and Path(media.local_path).exists() else None
+    media_url = None if host_path else media.source_url
     referer = cover_referer(media_url or video.source_url, video.source_url)
     download_options = _download_options(session)
     if media_url and ".m3u8" in media_url.lower():
@@ -1991,9 +2041,22 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
         download_to_path(media_url, saved, referer=referer, cancel_check=cancelled, **download_options)
         if cancelled():
             saved.unlink(missing_ok=True)
-            return None
-        local_media_path = path_for_moss(str(saved))
+            return {"cancelled": True}
+        host_path = str(saved)
         media_url = None
+    return {"host_path": host_path, "media_url": media_url, "referer": referer, "download_options": download_options}
+
+
+def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAsset, language: str, hotwords: str | None = None) -> Transcript | None:
+    settings = merge_settings("transcription", (session.get(ConfigRecord, "transcription") or ConfigRecord(key="transcription", value_json={})).value_json)
+    moss_url = moss_service_url(settings)
+    resolved = _resolve_transcribe_media(session, job, video)
+    if resolved is None or resolved.get("cancelled"):
+        return None
+    local_media_path = path_for_moss(resolved["host_path"])
+    media_url = None if local_media_path else resolved["media_url"]
+    referer = resolved["referer"]
+    download_options = resolved["download_options"]
     _append_job_log(session, job, "正在提交转录任务", "info", "transcribe_queued", 0.28)
     retries = max(0, min(int(settings.get("retry_times") or 0), 5))
     created: httpx.Response | None = None
@@ -2137,6 +2200,207 @@ def _run_moss_transcription(session: Session, job: ProcessingJob, video: VideoAs
     transcript = _save_transcript(session, job, result, language)
     _append_job_log(session, job, f"转录完成，共 {len(transcript.text)} 字", "info", "transcribed", 0.72)
     return transcript
+
+
+class VllmAsrUnavailable(RuntimeError):
+    """vLLM 转录池连接不上（auto 模式下触发回退本机 MOSS）。"""
+
+
+_MOSS_TOKEN_RE = re.compile(r"\[(\d+(?:\.\d+)?)\]|\[[Ss](\d+)\]")
+
+
+def _vllm_speaker_label(idx: int) -> str:
+    return f"说话人 {chr(ord('A') + ((idx - 1) % 26))}"
+
+
+def _segments_from_moss_text(raw: str, fallback_end_ms: float) -> list[dict[str, Any]]:
+    """把 vLLM MOSS 返回的内联标注文本拆成与 moss 道一致的 segments。
+
+    文法：[start][Sxx] 文本 [end]；相邻段共享边界时表现为 [end][start'][Sxx']。
+    """
+    segments: list[dict[str, Any]] = []
+    speaker: int | None = None
+    start_ms: float | None = None
+    buf: list[str] = []
+    pos = 0
+
+    def close(end_ms: float) -> None:
+        text = "".join(buf).strip()
+        if speaker is not None and start_ms is not None and text:
+            segments.append({
+                "text": text,
+                "start_ms": round(start_ms, 1),
+                "end_ms": round(max(end_ms, start_ms), 1),
+                "speaker": _vllm_speaker_label(speaker),
+                "is_final": True,
+            })
+        buf.clear()
+
+    for match in _MOSS_TOKEN_RE.finditer(raw):
+        if match.start() > pos:
+            buf.append(raw[pos:match.start()])
+        pos = match.end()
+        seconds, spk = match.group(1), match.group(2)
+        if spk:
+            speaker = int(spk)
+            if start_ms is None:
+                start_ms = 0.0
+        else:
+            ms = float(seconds) * 1000
+            if speaker is not None and start_ms is not None:
+                close(ms)
+            start_ms = ms
+    if pos < len(raw):
+        buf.append(raw[pos:])
+    close(fallback_end_ms)
+    return segments
+
+
+def _strip_moss_tokens(raw: str) -> str:
+    return _MOSS_TOKEN_RE.sub("", str(raw or "")).strip()
+
+
+def _ffmpeg_bin() -> str | None:
+    return shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
+
+
+def _convert_to_wav16k(host_path: str, dest: Path) -> bool:
+    """任意媒体 → 16k 单声道 wav。
+
+    宿主机有 ffmpeg 直接转；没有（本机开发常态）则借 moss 容器里的 ffmpeg：
+    docker exec 转到容器 /tmp 再 docker cp 出来（storage 挂载是只读的）。
+    """
+    args = ["-y", "-i", host_path, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", str(dest)]
+    ff = _ffmpeg_bin()
+    if ff:
+        proc = subprocess.run([ff, *args], capture_output=True, text=True, timeout=1800)
+        return proc.returncode == 0 and dest.exists()
+    container = os.getenv("MOSS_DOCKER_CONTAINER", "moss-transcribe")
+    inner_src = path_for_moss(host_path)
+    if not inner_src:
+        return False
+    inner_dst = f"/tmp/{dest.name}"
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", container, "ffmpeg", "-y", "-i", inner_src, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", inner_dst],
+            capture_output=True, text=True, timeout=1800,
+        )
+        if proc.returncode != 0:
+            return False
+        subprocess.run(["docker", "cp", f"{container}:{inner_dst}", str(dest)], capture_output=True, timeout=300)
+        return dest.exists()
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _wav_duration_seconds(wav_path: Path) -> float | None:
+    try:
+        import wave
+
+        with wave.open(str(wav_path), "rb") as source:
+            frames = source.getnframes()
+            rate = source.getframerate() or 1
+            return round(frames / float(rate), 2)
+    except Exception:  # noqa: BLE001 - 时长拿不到不影响转录
+        return None
+
+
+def _run_vllm_transcription(session: Session, job: ProcessingJob, video: VideoAsset, language: str, hotwords: str | None = None) -> Transcript | None:
+    """走 33 上的 vLLM 转录池（MOSS-Transcribe，/v1/audio/transcriptions）。
+
+    与 moss 道的区别：无全局推理锁，vLLM 侧 continuous batching 天然承载多任务
+    并发；单次同步 HTTP 调用，没有任务轮询/取消语义（取消只丢弃本地结果）。
+    """
+    settings = merge_settings("transcription", (session.get(ConfigRecord, "transcription") or ConfigRecord(key="transcription", value_json={})).value_json)
+    pool_url = vllm_asr_url(settings)
+    if not pool_url:
+        _fail_job(session, job, "未配置 vLLM 转录池地址（VLLM_ASR_URL）", "transcribe_queued")
+        return None
+    resolved = _resolve_transcribe_media(session, job, video)
+    if resolved is None or resolved.get("cancelled"):
+        return None
+    host_path = resolved["host_path"]
+    downloaded = False
+    if not host_path and resolved["media_url"]:
+        suffix = Path(resolved["media_url"].split("?")[0]).suffix or ".mp4"
+        saved = TEMP_DIR / f"vllm-src-{job.id}{suffix}"
+        def cancelled() -> bool:
+            with SessionLocal() as check_session:
+                current = check_session.get(ProcessingJob, job.id)
+                return current is None or current.status == "cancelled"
+
+        download_to_path(resolved["media_url"], saved, referer=resolved["referer"], cancel_check=cancelled, **resolved["download_options"])
+        if cancelled():
+            saved.unlink(missing_ok=True)
+            return None
+        host_path = str(saved)
+        downloaded = True
+    if not host_path:
+        _fail_job(session, job, "没有可用的本地媒体或直链，无法提取音频", "extracting_audio")
+        return None
+    if hotwords:
+        _append_job_log(session, job, "vLLM 转录池暂不支持热词，本次任务忽略热词设置", "warning", "transcribe_queued", 0.28)
+    wav_path = TEMP_DIR / f"vllm-{job.id}.wav"
+    try:
+        _append_job_log(session, job, "正在提取音频（16k wav）", "info", "converting", 0.28)
+        if not _convert_to_wav16k(host_path, wav_path):
+            _fail_job(session, job, "音频提取失败（ffmpeg 不可用或媒体损坏）", "converting")
+            return None
+        audio_seconds = _wav_duration_seconds(wav_path) or video.duration_seconds
+        if audio_seconds and not video.duration_seconds:
+            video.duration_seconds = int(float(audio_seconds))
+        estimate = f"约 {max(1, int((audio_seconds or 0) / 48))} 分钟" if audio_seconds else "时长未知"
+        _append_job_log(session, job, f"已提交 vLLM 转录池（continuous batching，预计 {estimate}）", "info", "transcribing", 0.3)
+        timeout = httpx.Timeout(max(900.0, float(audio_seconds or 0) * 2.0), connect=15.0)
+        try:
+            with wav_path.open("rb") as fh, httpx.Client(timeout=timeout) as client:
+                response = client.post(
+                    f"{pool_url}/v1/audio/transcriptions",
+                    files={"file": (wav_path.name, fh, "audio/wav")},
+                    data={"model": "moss-transcribe"},
+                )
+        except (httpx.RequestError, OSError) as exc:
+            raise VllmAsrUnavailable(f"{pool_url}：{exc}") from exc
+        if response.status_code >= 400:
+            detail = _http_error_detail(response)
+            if response.status_code in {502, 503, 504}:
+                raise VllmAsrUnavailable(f"{pool_url}：HTTP {response.status_code} {detail}")
+            _fail_job(session, job, f"转录池拒绝任务：{detail}", "transcribing")
+            return None
+        raw_text = str((response.json() or {}).get("text") or "")
+        segments = _segments_from_moss_text(raw_text, (audio_seconds or 0) * 1000)
+        session.refresh(job)
+        if job.status == "cancelled":
+            return None
+        result = {
+            "text": "\n".join(str(item.get("text") or "") for item in segments).strip() or _strip_moss_tokens(raw_text),
+            "segments": segments,
+            "model": "MOSS-Transcribe-Diarize (vLLM pool)",
+            "audio_seconds": audio_seconds,
+        }
+        transcript = _save_transcript(session, job, result, language)
+        _append_job_log(session, job, f"转录完成，共 {len(transcript.text)} 字", "info", "transcribed", 0.72)
+        return transcript
+    finally:
+        wav_path.unlink(missing_ok=True)
+        if downloaded and host_path:
+            Path(host_path).unlink(missing_ok=True)
+
+
+def _run_transcription(session: Session, job: ProcessingJob, video: VideoAsset, language: str, hotwords: str | None = None) -> Transcript | None:
+    """按 ASR_BACKEND 分发转录后端；auto 时 vLLM 不可用自动回退本机 MOSS。"""
+    settings = merge_settings("transcription", (session.get(ConfigRecord, "transcription") or ConfigRecord(key="transcription", value_json={})).value_json)
+    backend = asr_backend(settings)
+    if backend == "moss":
+        return _run_moss_transcription(session, job, video, language, hotwords)
+    if backend == "vllm":
+        return _run_vllm_transcription(session, job, video, language, hotwords)
+    if vllm_asr_url(settings):
+        try:
+            return _run_vllm_transcription(session, job, video, language, hotwords)
+        except VllmAsrUnavailable as exc:
+            _append_job_log(session, job, f"vLLM 转录池不可用（{exc}），回退本机 MOSS 慢速道", "warning", "transcribe_queued", 0.28)
+    return _run_moss_transcription(session, job, video, language, hotwords)
 
 
 def _http_error_detail(response: httpx.Response) -> str:
@@ -2456,7 +2720,7 @@ def execute_transcribe_job(job_id: str, language: str, hotwords: str | None = No
                 if not video:
                     _fail_job(session, job, "视频不存在", "queued")
                     return
-                transcript = _run_moss_transcription(session, job, video, language, hotwords)
+                transcript = _run_transcription(session, job, video, language, hotwords)
                 if not transcript:
                     return
                 job = session.get(ProcessingJob, job_id)
@@ -2486,7 +2750,7 @@ def execute_summary_job(job_id: str, template_id: str | None, language: str, reu
                 if transcript and transcript.text.strip():
                     _append_job_log(session, job, f"使用已有转录，共 {len(transcript.text)} 字", "info", "transcribed", 0.72)
                 else:
-                    transcript = _run_moss_transcription(session, job, video, language)
+                    transcript = _run_transcription(session, job, video, language)
                     if not transcript:
                         return
                 job = session.get(ProcessingJob, job_id)

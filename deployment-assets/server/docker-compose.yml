@@ -33,6 +33,11 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       MOSS_URL: http://moss:9000
+      # vLLM 转录池（GPU3，plugin_parser-vllm）。api 容器经宿主机发布端口访问。
+      # 不设或设空 = 不启用 vLLM 道，维持本机 moss 慢速道；ASR_BACKEND=auto 时
+      # vLLM 掉线自动回退 moss。本机开发可不配。
+      VLLM_ASR_URL: ${VLLM_ASR_URL:-}
+      ASR_BACKEND: ${ASR_BACKEND:-auto}
       STORAGE_ROOT: /data
       # Tell MOSS where the shared media volume is mounted inside its container.
       MOSS_MEDIA_ROOT: /data

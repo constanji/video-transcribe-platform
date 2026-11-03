@@ -223,6 +223,8 @@ def meeting_dict(session: Session, meeting) -> dict[str, Any]:
         "title": meeting.title,
         "mode": meeting.mode,
         "status": meeting.status,
+        # 来源标记：api_key_id 非空即 agent（MCP ASR 中间层）发起
+        "source": "agent" if meeting.api_key_id else "web",
         "language": meeting.language,
         "audio_source": meeting.audio_source,
         "hotwords": meeting.hotwords,
@@ -240,12 +242,11 @@ def meeting_dict(session: Session, meeting) -> dict[str, Any]:
 
 
 def require_moss_ready() -> dict[str, Any]:
-    from .main import ensure_moss_available
+    from .main import ensure_asr_available
 
-    # 统一前置检查里带僵尸锁回收：本平台已失败/已取消的任务若还在 MOSS 侧
-    # 占着推理锁（典型：转录超时），直接取消抢回，别让用户的重试永远被
-    # 「正忙于另一个任务」挡住。
-    return ensure_moss_available()
+    # 按后端选择探测：vLLM 转录池（无推理锁）或本机 MOSS（含僵尸锁回收：
+    # 本平台已失败/已取消的任务若还在 MOSS 侧占着推理锁，直接取消抢回）。
+    return ensure_asr_available()
 
 
 def start_final_transcribe(session: Session, meeting) -> Any:
