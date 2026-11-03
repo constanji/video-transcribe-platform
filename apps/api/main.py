@@ -2573,6 +2573,9 @@ def _run_vllm_transcription(session: Session, job: ProcessingJob, video: VideoAs
     if hotwords:
         _append_job_log(session, job, f"热词已随请求提交转录池（{len(hotwords.split(','))} 个）", "info", "transcribe_queued", 0.28)
     chunk_seconds, overlap_seconds, chunk_concurrency = _vllm_chunk_settings(settings)
+    # 混合策略：≤阈值（默认 45min，32768+ 上下文装得下）整段直转，说话人分离最准；
+    # 超过才分块（时间轴/完整性优先，说话人标签为近似对齐）。
+    threshold_minutes = float(settings.get("vllm_chunk_threshold_minutes") or 45)
     wav_path = TEMP_DIR / f"vllm-{job.id}.wav"
     chunk_files: list[Path] = []
     try:
@@ -2583,19 +2586,24 @@ def _run_vllm_transcription(session: Session, job: ProcessingJob, video: VideoAs
         audio_seconds = _wav_duration_seconds(wav_path) or video.duration_seconds
         if audio_seconds and not video.duration_seconds:
             video.duration_seconds = int(float(audio_seconds))
-        try:
-            chunks = _split_wav16k(wav_path, chunk_seconds, overlap_seconds)
-        except Exception as exc:  # noqa: BLE001 - 切分失败退回整段单请求
+        whole_file = not audio_seconds or audio_seconds <= threshold_minutes * 60
+        if whole_file:
             chunks = [(wav_path, 0.0)]
-            _append_job_log(session, job, f"音频切分失败（{exc}），退回整段单请求", "warning", "transcribing", 0.3)
+        else:
+            try:
+                chunks = _split_wav16k(wav_path, chunk_seconds, overlap_seconds)
+            except Exception as exc:  # noqa: BLE001 - 切分失败退回整段单请求
+                chunks = [(wav_path, 0.0)]
+                _append_job_log(session, job, f"音频切分失败（{exc}），退回整段单请求", "warning", "transcribing", 0.3)
         chunk_files = [path for path, _ in chunks if path != wav_path]
         if len(chunks) > _VLLM_CHUNK_MAX:
             _fail_job(session, job, f"音频时长超出上限（切出 {len(chunks)} 块，最多 {_VLLM_CHUNK_MAX} 块，约 4 小时）", "transcribing")
             return None
         if len(chunks) > 1:
-            _append_job_log(session, job, f"已切分为 {len(chunks)} 块（每块约 {chunk_seconds // 60} 分钟，重叠 {overlap_seconds}s），并行提交转录池", "info", "transcribing", 0.3)
+            _append_job_log(session, job, f"音频 {int((audio_seconds or 0) // 60)} 分钟超过 {int(threshold_minutes)} 分钟阈值，已切分为 {len(chunks)} 块（每块约 {chunk_seconds // 60} 分钟，重叠 {overlap_seconds}s）并行提交", "info", "transcribing", 0.3)
         else:
-            _append_job_log(session, job, f"已提交 vLLM 转录池（continuous batching，预计 约 {max(1, int((audio_seconds or 0) / 48))} 分钟）", "info", "transcribing", 0.3)
+            estimate = f"约 {max(1, int((audio_seconds or 0) / 48))} 分钟" if audio_seconds else "时长未知"
+            _append_job_log(session, job, f"已提交 vLLM 转录池（continuous batching，预计 {estimate}）", "info", "transcribing", 0.3)
 
         # 并行提交各块；进度从 0.3 按完成块数推进到 0.68。
         cancel_event = threading.Event()
@@ -2611,7 +2619,7 @@ def _run_vllm_transcription(session: Session, job: ProcessingJob, video: VideoAs
                     raise RuntimeError("任务已取消")
                 try:
                     chunk_len = _wav_duration_seconds(path) or float(chunk_seconds)
-                    raw = _transcribe_chunk_once(pool_url, path, max(300.0, chunk_len * 2.0), hotwords)
+                    raw = _transcribe_chunk_once(pool_url, path, max(900.0, chunk_len * 2.0), hotwords)
                     segs = _segments_from_moss_text(raw, chunk_len * 1000.0, raw_speaker=True)
                     for seg in segs:
                         seg["start_ms"] = round(seg["start_ms"] + offset * 1000.0, 1)
