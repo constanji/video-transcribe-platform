@@ -55,11 +55,11 @@ def _now():
 # /mcp 入口认证（ASGI 层，FastMCP 挂载前包装）
 # ---------------------------------------------------------------------------
 
-def _auth_error_response(send) -> None:
+async def _auth_error_response(send) -> None:
     body = b'{"detail":"X-API-Key invalid or missing"}'
     headers = [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]
-    send({"type": "http.response.start", "status": 401, "headers": headers})
-    send({"type": "http.response.body", "body": body})
+    await send({"type": "http.response.start", "status": 401, "headers": headers})
+    await send({"type": "http.response.body", "body": body})
 
 
 def _check_api_key(raw_key: str) -> bool:
