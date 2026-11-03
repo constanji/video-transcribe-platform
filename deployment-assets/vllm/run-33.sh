@@ -37,8 +37,8 @@ docker run -d --name "$NAME" \
     --trust-remote-code \
     --served-model-name moss-transcribe \
     --host 0.0.0.0 --port 8000 \
-    --gpu-memory-utilization 0.85 \
-    --max-model-len 32768 \
+    --gpu-memory-utilization 0.90 \
+    --max-model-len 65536 \
     --max-num-seqs 8
 
 echo "started $NAME on GPU3; logs: docker logs -f $NAME"
