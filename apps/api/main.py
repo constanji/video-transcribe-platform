@@ -2386,7 +2386,9 @@ def _quietest_block_cut(src: Any, target_frame: int, rate: int) -> int:
             if not samples:
                 continue
             peak = max(abs(s) for s in samples)
-            if best_peak is None or peak < best_peak:
+            # 等峰值（同为静音）时取离目标切点最近的，块长分布更均衡
+            closer = best_peak is not None and peak == best_peak and abs(start - target_frame) < abs(best_frame - target_frame)
+            if best_peak is None or peak < best_peak or closer:
                 best_peak, best_frame = peak, start
         return best_frame
     except Exception:  # noqa: BLE001 - 对齐失败就用精确切点
@@ -2394,8 +2396,10 @@ def _quietest_block_cut(src: Any, target_frame: int, rate: int) -> int:
 
 
 def _split_wav16k(wav_path: Path, chunk_seconds: int, overlap_seconds: int) -> list[tuple[Path, float]]:
-    """把 16k 单声道 wav 切成 (块文件, 偏移秒) 列表，切点对齐静音。
+    """把 16k 单声道 wav 切成 (块文件, 偏移秒) 列表，块间真重叠 overlap_seconds。
 
+    每块约 chunk_seconds 长，结尾在静音处收口；下一块从该切点前 overlap_seconds
+    开始——重叠区是两块共有的真实语音，供重叠去重与跨块说话人对齐。
     时长 ≤ 块长时返回 [(原文件, 0.0)]，不产生新文件。
     """
     import wave
@@ -2404,24 +2408,36 @@ def _split_wav16k(wav_path: Path, chunk_seconds: int, overlap_seconds: int) -> l
         rate = src.getframerate() or 16000
         total_frames = src.getnframes()
         chunk_frames = chunk_seconds * rate
+        overlap_frames = overlap_seconds * rate
         if total_frames <= chunk_frames:
             return [(wav_path, 0.0)]
-        overlap_frames = overlap_seconds * rate
-        stride = chunk_frames - overlap_frames
-        bounds: list[int] = []
-        cursor = chunk_frames
-        while cursor < total_frames - overlap_frames:
-            bounds.append(_quietest_block_cut(src, cursor, rate))
-            cursor += stride
+        spans: list[tuple[int, int]] = []
+        start = 0
+        while True:
+            end_target = start + chunk_frames
+            if end_target >= total_frames:
+                spans.append((start, total_frames))
+                break
+            end = _quietest_block_cut(src, end_target, rate)
+            # 约束切点必须让下一块起点至少前进 1s：静音窗口可能选中更早的静音，
+            # 或直接选到窗口前沿；不满足就退回精确切点。
+            min_end = start + overlap_frames + rate
+            if end <= min_end:
+                end = min(end_target, total_frames)
+            if end <= min_end:
+                end = start + chunk_frames
+            spans.append((start, min(end, total_frames)))
+            start = end - overlap_frames
+        # 收尾碎块（<1s）并入前一块
+        if len(spans) > 1 and spans[-1][1] - spans[-1][0] < rate:
+            spans.pop()
+            s, _ = spans.pop()
+            spans.append((s, total_frames))
         params = src.getparams()
 
-    cuts = [0, *bounds, total_frames]
     chunks: list[tuple[Path, float]] = []
     stem = wav_path.stem
-    for idx in range(len(cuts) - 1):
-        start_f, end_f = cuts[idx], cuts[idx + 1]
-        if end_f - start_f < rate // 2:  # <0.5s 的碎块并入相邻块，跳过
-            continue
+    for idx, (start_f, end_f) in enumerate(spans):
         out = wav_path.with_name(f"{stem}.part{idx:02d}.wav")
         with wave.open(str(wav_path), "rb") as reader, wave.open(str(out), "wb") as writer:
             writer.setparams(params)

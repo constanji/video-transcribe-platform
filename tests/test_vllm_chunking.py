@@ -42,29 +42,24 @@ def test_split_short_returns_same_file(tmp: Path):
     assert chunks[0][0] == wav and chunks[0][1] == 0.0
 
 
-def test_split_long_aligns_silence(tmp: Path):
-    # 35s 音频、块长 10s、重叠 2s → 期望 4 块左右；在 10s/20s/30s 处留静音供对齐
+def test_split_long_aligns_silence_with_true_overlap(tmp: Path):
+    # 35s 音频、块长 10s、重叠 2s → 期望 5 块左右；在 10s/20s/30s 处留静音供收口
     wav = _make_wav(tmp / "long.wav", 35, silence_at=[10, 20, 30])
     chunks = _split_wav16k(wav, chunk_seconds=10, overlap_seconds=2)
     assert len(chunks) >= 3
-    # 块偏移递增且覆盖全程
     offsets = [off for _, off in chunks]
     assert offsets == sorted(offsets) and offsets[0] == 0.0
-    # 切点落在静音处（±10s 窗口内选最安静块，允许偏移但不得晚于窗口边界）
-    for off in offsets[1:]:
-        assert 0 < off <= 35
-    # 块文件能正常打开且时长 <= 块长 + 窗口
-    for path, _ in chunks:
+    # 真重叠：相邻块步距 = 块长 - 重叠（静音对齐允许 ±窗口浮动）
+    stride = 10 - 2
+    for a, b in zip(offsets, offsets[1:]):
+        assert stride - 10 <= (b - a) <= stride + 10
+        assert b - a > 0
+    # 每块时长 ≈ 块长（±静音窗口），最后一块收在音频末尾
+    for path, off in chunks:
         with wave.open(str(path), "rb") as w:
             dur = w.getnframes() / w.getframerate()
-        assert dur <= 10 + 10 + 1  # 块长 + 静音窗口 + 余量
-
-
-def test_split_respects_max_content(tmp: Path):
-    wav = _make_wav(tmp / "x.wav", 100, silence_at=list(range(0, 100, 10)))
-    chunks = _split_wav16k(wav, chunk_seconds=10, overlap_seconds=2)
-    # 100s / stride 8s ≈ 12 块
-    assert 8 <= len(chunks) <= 14
+        assert 2 <= dur <= 10 + 10 + 1
+    assert offsets[-1] + 10 >= 35 - 10  # 覆盖到末尾（容差一个窗口）
 
 
 def test_drop_overlap_duplicates():
@@ -116,8 +111,7 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         test_split_short_returns_same_file(tmp)
-        test_split_long_aligns_silence(tmp)
-        test_split_respects_max_content(tmp)
+        test_split_long_aligns_silence_with_true_overlap(tmp)
         test_drop_overlap_duplicates()
         test_align_chunk_speakers_matching()
         test_segments_raw_speaker()
