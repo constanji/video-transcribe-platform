@@ -443,13 +443,18 @@ def mount_asr_mcp(parent_app) -> None:
     重定向导致握手失败。补一条 /mcp 精确路由（子路径归一为 /）直接处理。
     """
 
-    async def _exact_no_slash(scope, receive, send):  # noqa: ANN001
-        scope = dict(scope, path="/")
-        await mcp_asgi(scope, receive, send)
+    class _ExactNoSlashRoot:
+        """纯 ASGI 包装实例（Starlette Route 对函数 endpoint 会做 request 包装，不适用）。"""
+
+        def __init__(self, app):
+            self._app = app
+
+        async def __call__(self, scope, receive, send):  # noqa: ANN001
+            await self._app(dict(scope, path="/"), receive, send)
 
     parent_app.mount("/mcp", mcp_asgi)
     from starlette.routing import Route as StarletteRoute
 
     parent_app.router.routes.append(
-        StarletteRoute("/mcp", _exact_no_slash, methods=["GET", "POST", "DELETE"])
+        StarletteRoute("/mcp", _ExactNoSlashRoot(mcp_asgi), methods=["GET", "POST", "DELETE"])
     )
