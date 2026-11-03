@@ -29,6 +29,7 @@ docker run -d --name "$NAME" \
   --cpus 8 --memory 16g --shm-size 4g \
   -p 18110:8000 \
   -e FLASHINFER_DISABLE_VERSION_CHECK=1 \
+  -e VLLM_MAX_AUDIO_CLIP_FILESIZE_MB=512 \
   -v /home/goodeep/jzj/models/moss:/models/moss:ro \
   "$TAG" \
   /models/moss/OpenMOSS-Team/MOSS-Transcribe-Diarize \
