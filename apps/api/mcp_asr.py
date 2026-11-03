@@ -423,7 +423,9 @@ def result(task_id: str, include_segments: bool = True) -> dict[str, Any]:
 # 挂载：/mcp → streamable-http app（带 API Key 中间件）
 # ---------------------------------------------------------------------------
 
-mcp_app = mcp.http_app(transport="streamable-http", path="/")
+# 无状态模式：agent 平台客户端 initialize 后不回传 mcp-session-id（400 Missing session ID），
+# 且三个工具本身无会话依赖（提交/查询/取结果），stateless 下任意 MCP 客户端均可直连。
+mcp_app = mcp.http_app(transport="streamable-http", path="/", stateless_http=True)
 mcp_asgi = _api_key_auth_wrapper(mcp_app)
 
 
