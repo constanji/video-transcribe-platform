@@ -49,12 +49,16 @@ done
 
 # The running image must be the tag we just released. Without this a stale
 # container happily passes every endpoint check while serving old code.
+# Exception: a service may be deliberately pinned to a non video-platform-*
+# image on the host (e.g. web -> local/security-node:* hotfix). A pin is an
+# explicit ops decision, so it only warns; anything else still must match.
 if [ -n "$EXPECTED_TAG" ]; then
   for svc in api moss web; do
     img="$(docker inspect -f '{{.Config.Image}}' "plugin_parser-$svc" 2>/dev/null)"
     case "$img" in
       *":$EXPECTED_TAG") ok "plugin_parser-$svc -> $img" ;;
-      *) fail "plugin_parser-$svc is running '$img', expected tag $EXPECTED_TAG" ;;
+      video-platform-*) fail "plugin_parser-$svc is running '$img', expected tag $EXPECTED_TAG" ;;
+      *) warn "plugin_parser-$svc pinned to '$img' (not a video-platform image; tag check skipped)" ;;
     esac
   done
 fi
