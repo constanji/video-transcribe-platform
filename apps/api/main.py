@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import copy
 import hashlib
 import io
@@ -862,6 +863,11 @@ def health():
         "summary_cli": moss.get("summary_cli"),
         "summary_cli_found": moss.get("summary_cli_found"),
         "default_language": "zh",
+        "vllm_asr": {
+            "url": vllm_asr_url() or None,
+            "backend": asr_backend(),
+            **vllm_pool_status(),
+        },
     }
 
 
@@ -1822,12 +1828,51 @@ def ensure_asr_available(settings: dict[str, Any] | None = None) -> dict[str, An
     if backend == "vllm" or (backend == "auto" and pool_url):
         if not pool_url:
             raise HTTPException(503, "已指定 vLLM 后端但未配置 VLLM_ASR_URL")
+        if vllm_pool_offline():
+            # 后台探活已连续失败，不再逐请求探测
+            if backend == "vllm":
+                raise HTTPException(503, f"vLLM 转录池离线（连续探活失败）：{pool_url}")
+            return ensure_moss_available(config)
         if probe_vllm(pool_url).get("reachable"):
             return config
         if backend == "vllm":
             raise HTTPException(503, f"vLLM 转录池不可达：{pool_url}")
         # auto：vLLM 掉线才落到本机 MOSS 检查
     return ensure_moss_available(config)
+
+
+# vLLM 转录池健康缓存：后台线程定期探活，进程内生效（重启即重置）。
+_vllm_health: dict[str, Any] = {"reachable": None, "last_ok_at": None, "last_fail_at": None, "fail_streak": 0}
+_vllm_health_lock = threading.Lock()
+_VLLM_PROBE_INTERVAL_S = 60.0
+_VLLM_OFFLINE_FAIL_STREAK = 3  # 连续失败 N 次判定离线
+
+
+def vllm_pool_status() -> dict[str, Any]:
+    with _vllm_health_lock:
+        return dict(_vllm_health)
+
+
+def vllm_pool_offline() -> bool:
+    """后台探活连续失败 ≥3 次即认为池离线（未启动探活或尚无数据时返回 False）。"""
+    snap = vllm_pool_status()
+    return snap["reachable"] is False and snap["fail_streak"] >= _VLLM_OFFLINE_FAIL_STREAK
+
+
+def _vllm_health_loop() -> None:
+    url = vllm_asr_url()
+    while url:
+        reachable = bool(probe_vllm(url).get("reachable"))
+        now = datetime.now(timezone.utc).isoformat()
+        with _vllm_health_lock:
+            _vllm_health["reachable"] = reachable
+            if reachable:
+                _vllm_health["last_ok_at"] = now
+                _vllm_health["fail_streak"] = 0
+            else:
+                _vllm_health["last_fail_at"] = now
+                _vllm_health["fail_streak"] = int(_vllm_health["fail_streak"]) + 1
+        time.sleep(_VLLM_PROBE_INTERVAL_S)
 
 
 @app.delete("/api/jobs/{job_id}")
@@ -2213,10 +2258,11 @@ def _vllm_speaker_label(idx: int) -> str:
     return f"说话人 {chr(ord('A') + ((idx - 1) % 26))}"
 
 
-def _segments_from_moss_text(raw: str, fallback_end_ms: float) -> list[dict[str, Any]]:
+def _segments_from_moss_text(raw: str, fallback_end_ms: float, raw_speaker: bool = False) -> list[dict[str, Any]]:
     """把 vLLM MOSS 返回的内联标注文本拆成与 moss 道一致的 segments。
 
     文法：[start][Sxx] 文本 [end]；相邻段共享边界时表现为 [end][start'][Sxx']。
+    raw_speaker=True 时 speaker 保留块内原始编号（int），供跨块对齐后再统一转标签。
     """
     segments: list[dict[str, Any]] = []
     speaker: int | None = None
@@ -2231,7 +2277,7 @@ def _segments_from_moss_text(raw: str, fallback_end_ms: float) -> list[dict[str,
                 "text": text,
                 "start_ms": round(start_ms, 1),
                 "end_ms": round(max(end_ms, start_ms), 1),
-                "speaker": _vllm_speaker_label(speaker),
+                "speaker": speaker if raw_speaker else _vllm_speaker_label(speaker),
                 "is_final": True,
             })
         buf.clear()
@@ -2305,6 +2351,167 @@ def _wav_duration_seconds(wav_path: Path) -> float | None:
         return None
 
 
+# ---------------------------------------------------------------- vLLM 分块
+
+_VLLM_CHUNK_MAX = 24          # 块数保护：>24 块（默认参数下 >4h）直接拒绝
+_VLLM_CHUNK_CUT_WINDOW = 10   # 静音对齐搜索窗口（秒，切点 ±window）
+
+
+def _vllm_chunk_settings(settings: dict[str, Any]) -> tuple[int, int, int]:
+    """分块参数：(块长秒, 重叠秒, 并发数)。全部来自 transcription settings，带钳制。"""
+    minutes = float(settings.get("vllm_chunk_minutes") or 10)
+    chunk_seconds = int(min(max(minutes * 60.0, 120.0), 1200.0))  # 2min..20min
+    overlap = int(min(max(float(settings.get("vllm_chunk_overlap_seconds") or 20), 0), 60))
+    concurrency = int(min(max(int(settings.get("vllm_chunk_concurrency") or 4), 1), 8))
+    return chunk_seconds, overlap, concurrency
+
+
+def _quietest_block_cut(src: Any, target_frame: int, rate: int) -> int:
+    """在 target_frame ±window 内找最安静的 100ms 块，返回该块起始帧。
+
+    src 为已打开的 wave 文件（16bit 单声道）。纯 Python 逐块算峰值，窗口 ~20s
+    数据量 ~640KB，可接受。任何异常都回退精确切点。
+    """
+    try:
+        import array
+
+        block = max(1, rate // 10)  # 100ms
+        lo = max(0, target_frame - _VLLM_CHUNK_CUT_WINDOW * rate)
+        hi = target_frame + _VLLM_CHUNK_CUT_WINDOW * rate
+        best_frame, best_peak = target_frame, None
+        for start in range(lo, hi, block):
+            src.setpos(start)
+            samples = array.array("h")
+            samples.frombytes(src.readframes(block))
+            if not samples:
+                continue
+            peak = max(abs(s) for s in samples)
+            if best_peak is None or peak < best_peak:
+                best_peak, best_frame = peak, start
+        return best_frame
+    except Exception:  # noqa: BLE001 - 对齐失败就用精确切点
+        return target_frame
+
+
+def _split_wav16k(wav_path: Path, chunk_seconds: int, overlap_seconds: int) -> list[tuple[Path, float]]:
+    """把 16k 单声道 wav 切成 (块文件, 偏移秒) 列表，切点对齐静音。
+
+    时长 ≤ 块长时返回 [(原文件, 0.0)]，不产生新文件。
+    """
+    import wave
+
+    with wave.open(str(wav_path), "rb") as src:
+        rate = src.getframerate() or 16000
+        total_frames = src.getnframes()
+        chunk_frames = chunk_seconds * rate
+        if total_frames <= chunk_frames:
+            return [(wav_path, 0.0)]
+        overlap_frames = overlap_seconds * rate
+        stride = chunk_frames - overlap_frames
+        bounds: list[int] = []
+        cursor = chunk_frames
+        while cursor < total_frames - overlap_frames:
+            bounds.append(_quietest_block_cut(src, cursor, rate))
+            cursor += stride
+        params = src.getparams()
+
+    cuts = [0, *bounds, total_frames]
+    chunks: list[tuple[Path, float]] = []
+    stem = wav_path.stem
+    for idx in range(len(cuts) - 1):
+        start_f, end_f = cuts[idx], cuts[idx + 1]
+        if end_f - start_f < rate // 2:  # <0.5s 的碎块并入相邻块，跳过
+            continue
+        out = wav_path.with_name(f"{stem}.part{idx:02d}.wav")
+        with wave.open(str(wav_path), "rb") as reader, wave.open(str(out), "wb") as writer:
+            writer.setparams(params)
+            reader.setpos(start_f)
+            writer.writeframes(reader.readframes(end_f - start_f))
+        chunks.append((out, round(start_f / float(rate), 3)))
+    return chunks or [(wav_path, 0.0)]
+
+
+def _transcribe_chunk_once(pool_url: str, chunk_path: Path, timeout: float, hotwords: str | None = None) -> str:
+    """单块转录请求，返回原始标注文本。
+
+    连接失败 / 502-504 抛 VllmAsrUnavailable（auto 模式据此回退 moss）；
+    其余 4xx/5xx 抛 RuntimeError（内容性问题，重试后仍失败则任务失败）。
+    hotwords 走 OpenAI 兼容字段（vLLM speech_to_text 协议原生支持）。
+    """
+    data = {"model": "moss-transcribe"}
+    if hotwords:
+        data["hotwords"] = hotwords
+    try:
+        with chunk_path.open("rb") as fh, httpx.Client(timeout=httpx.Timeout(timeout, connect=15.0)) as client:
+            response = client.post(
+                f"{pool_url}/v1/audio/transcriptions",
+                files={"file": (chunk_path.name, fh, "audio/wav")},
+                data=data,
+            )
+    except (httpx.RequestError, OSError) as exc:
+        raise VllmAsrUnavailable(f"{pool_url}：{exc}") from exc
+    if response.status_code >= 400:
+        detail = _http_error_detail(response)
+        if response.status_code in {502, 503, 504}:
+            raise VllmAsrUnavailable(f"{pool_url}：HTTP {response.status_code} {detail}")
+        raise RuntimeError(f"HTTP {response.status_code} {detail}")
+    return str((response.json() or {}).get("text") or "")
+
+
+def _texts_similar(a: str, b: str) -> float:
+    import difflib
+
+    a, b = str(a or "").strip(), str(b or "").strip()
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def _drop_overlap_duplicates(prev_segments: list[dict[str, Any]], curr_segments: list[dict[str, Any]], overlap_start_ms: float, overlap_end_ms: float) -> list[dict[str, Any]]:
+    """丢弃 curr 在重叠区内与 prev 时间戳相近且文本相似的重复段。"""
+    prev_in_overlap = [s for s in prev_segments if s["end_ms"] > overlap_start_ms]
+    kept: list[dict[str, Any]] = []
+    for seg in curr_segments:
+        if seg["start_ms"] < overlap_end_ms:
+            dup = any(
+                abs(p["start_ms"] - seg["start_ms"]) <= 1500 and _texts_similar(p["text"], seg["text"]) >= 0.8
+                for p in prev_in_overlap
+            )
+            if dup:
+                continue
+        kept.append(seg)
+    return kept
+
+
+def _align_chunk_speakers(prev_segments: list[dict[str, Any]], curr_segments: list[dict[str, Any]], overlap_start_ms: float, overlap_end_ms: float, next_global: int) -> tuple[dict[int, int], int]:
+    """跨块说话人对齐（重叠区文本相似度贪心匹配）。
+
+    返回 (块内局部编号 → 全局编号映射, 更新后的 next_global)。
+    """
+    prev_in_overlap = [s for s in prev_segments if s["end_ms"] > overlap_start_ms]
+    curr_in_overlap = [s for s in curr_segments if s["start_ms"] < overlap_end_ms]
+    mapping: dict[int, int] = {}
+    used_prev: set[int] = set()
+    candidates: list[tuple[float, int, int]] = []
+    for seg in curr_in_overlap:
+        for p in prev_in_overlap:
+            score = _texts_similar(p["text"], seg["text"])
+            if score >= 0.55:
+                candidates.append((score, int(seg["speaker"]), int(p["speaker"])))
+    for score, local, glob in sorted(candidates, reverse=True):
+        if local in mapping or glob in used_prev:
+            continue
+        mapping[local] = glob
+        used_prev.add(glob)
+    for seg in curr_segments:
+        local = int(seg["speaker"])
+        if local not in mapping:
+            mapping[local] = next_global
+            next_global += 1
+    return mapping, next_global
+
+
+
 def _run_vllm_transcription(session: Session, job: ProcessingJob, video: VideoAsset, language: str, hotwords: str | None = None) -> Transcript | None:
     """走 33 上的 vLLM 转录池（MOSS-Transcribe，/v1/audio/transcriptions）。
 
@@ -2339,8 +2546,10 @@ def _run_vllm_transcription(session: Session, job: ProcessingJob, video: VideoAs
         _fail_job(session, job, "没有可用的本地媒体或直链，无法提取音频", "extracting_audio")
         return None
     if hotwords:
-        _append_job_log(session, job, "vLLM 转录池暂不支持热词，本次任务忽略热词设置", "warning", "transcribe_queued", 0.28)
+        _append_job_log(session, job, f"热词已随请求提交转录池（{len(hotwords.split(','))} 个）", "info", "transcribe_queued", 0.28)
+    chunk_seconds, overlap_seconds, chunk_concurrency = _vllm_chunk_settings(settings)
     wav_path = TEMP_DIR / f"vllm-{job.id}.wav"
+    chunk_files: list[Path] = []
     try:
         _append_job_log(session, job, "正在提取音频（16k wav）", "info", "converting", 0.28)
         if not _convert_to_wav16k(host_path, wav_path):
@@ -2349,40 +2558,118 @@ def _run_vllm_transcription(session: Session, job: ProcessingJob, video: VideoAs
         audio_seconds = _wav_duration_seconds(wav_path) or video.duration_seconds
         if audio_seconds and not video.duration_seconds:
             video.duration_seconds = int(float(audio_seconds))
-        estimate = f"约 {max(1, int((audio_seconds or 0) / 48))} 分钟" if audio_seconds else "时长未知"
-        _append_job_log(session, job, f"已提交 vLLM 转录池（continuous batching，预计 {estimate}）", "info", "transcribing", 0.3)
-        timeout = httpx.Timeout(max(900.0, float(audio_seconds or 0) * 2.0), connect=15.0)
         try:
-            with wav_path.open("rb") as fh, httpx.Client(timeout=timeout) as client:
-                response = client.post(
-                    f"{pool_url}/v1/audio/transcriptions",
-                    files={"file": (wav_path.name, fh, "audio/wav")},
-                    data={"model": "moss-transcribe"},
-                )
-        except (httpx.RequestError, OSError) as exc:
-            raise VllmAsrUnavailable(f"{pool_url}：{exc}") from exc
-        if response.status_code >= 400:
-            detail = _http_error_detail(response)
-            if response.status_code in {502, 503, 504}:
-                raise VllmAsrUnavailable(f"{pool_url}：HTTP {response.status_code} {detail}")
-            _fail_job(session, job, f"转录池拒绝任务：{detail}", "transcribing")
+            chunks = _split_wav16k(wav_path, chunk_seconds, overlap_seconds)
+        except Exception as exc:  # noqa: BLE001 - 切分失败退回整段单请求
+            chunks = [(wav_path, 0.0)]
+            _append_job_log(session, job, f"音频切分失败（{exc}），退回整段单请求", "warning", "transcribing", 0.3)
+        chunk_files = [path for path, _ in chunks if path != wav_path]
+        if len(chunks) > _VLLM_CHUNK_MAX:
+            _fail_job(session, job, f"音频时长超出上限（切出 {len(chunks)} 块，最多 {_VLLM_CHUNK_MAX} 块，约 4 小时）", "transcribing")
             return None
-        raw_text = str((response.json() or {}).get("text") or "")
-        segments = _segments_from_moss_text(raw_text, (audio_seconds or 0) * 1000)
+        if len(chunks) > 1:
+            _append_job_log(session, job, f"已切分为 {len(chunks)} 块（每块约 {chunk_seconds // 60} 分钟，重叠 {overlap_seconds}s），并行提交转录池", "info", "transcribing", 0.3)
+        else:
+            _append_job_log(session, job, f"已提交 vLLM 转录池（continuous batching，预计 约 {max(1, int((audio_seconds or 0) / 48))} 分钟）", "info", "transcribing", 0.3)
+
+        # 并行提交各块；进度从 0.3 按完成块数推进到 0.68。
+        cancel_event = threading.Event()
+        results: dict[int, list[dict[str, Any]]] = {}
+        chunk_error: str | None = None
+
+        def _worker(idx: int, path: Path, offset: float) -> tuple[int, list[dict[str, Any]]]:
+            if cancel_event.is_set():
+                raise RuntimeError("任务已取消")
+            last_exc: Exception | None = None
+            for attempt in (1, 2):  # 单块失败重试 1 次；池不可用不重试，直接回退
+                if cancel_event.is_set():
+                    raise RuntimeError("任务已取消")
+                try:
+                    chunk_len = _wav_duration_seconds(path) or float(chunk_seconds)
+                    raw = _transcribe_chunk_once(pool_url, path, max(300.0, chunk_len * 2.0), hotwords)
+                    segs = _segments_from_moss_text(raw, chunk_len * 1000.0, raw_speaker=True)
+                    for seg in segs:
+                        seg["start_ms"] = round(seg["start_ms"] + offset * 1000.0, 1)
+                        seg["end_ms"] = round(seg["end_ms"] + offset * 1000.0, 1)
+                    return idx, segs
+                except VllmAsrUnavailable:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+            raise RuntimeError(f"块 {idx + 1} 转录失败：{last_exc}")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(chunk_concurrency, len(chunks))) as pool:
+            futures = {pool.submit(_worker, idx, path, offset): idx for idx, (path, offset) in enumerate(chunks)}
+            done_count = 0
+            for future in concurrent.futures.as_completed(futures):
+                session.refresh(job)
+                if job.status == "cancelled":
+                    cancel_event.set()
+                    return None
+                try:
+                    idx, segs = future.result()
+                except VllmAsrUnavailable as exc:
+                    cancel_event.set()
+                    raise VllmAsrUnavailable(str(exc)) from exc
+                except RuntimeError as exc:
+                    if str(exc) == "任务已取消":
+                        cancel_event.set()
+                        return None
+                    chunk_error = str(exc)
+                    cancel_event.set()
+                    break
+                done_count += 1
+                results[idx] = segs
+                _append_job_log(session, job, f"块 {idx + 1}/{len(chunks)} 转录完成", "info", "transcribing", 0.3 + 0.38 * done_count / len(chunks))
+        if job.status == "cancelled":
+            return None
+        if chunk_error is not None or len(results) != len(chunks):
+            _fail_job(session, job, chunk_error or "部分音频块未完成转录", "transcribing")
+            return None
+
+        # 按块序合并：重叠去重 + 跨块说话人对齐。
+        merged: list[dict[str, Any]] = []
+        global_of: dict[int, int] = {}
+        mapping_notes: list[str] = []
+        next_global = 1
+        for idx in range(len(chunks)):
+            segs = results[idx]
+            if idx == 0:
+                for seg in segs:
+                    local = int(seg["speaker"])
+                    global_of.setdefault(local, len(global_of) + 1)
+                aligned = [dict(seg, speaker=global_of[int(seg["speaker"])]) for seg in segs]
+                merged.extend(aligned)
+                continue
+            offset_ms = chunks[idx][1] * 1000.0
+            overlap_start_ms, overlap_end_ms = offset_ms, offset_ms + overlap_seconds * 1000.0
+            prev_merged = merged
+            segs = _drop_overlap_duplicates(prev_merged, segs, overlap_start_ms, overlap_end_ms)
+            mapping, next_global = _align_chunk_speakers(prev_merged, segs, overlap_start_ms, overlap_end_ms, next_global)
+            mapping_notes.append("、".join(f"S{local}→{_vllm_speaker_label(glob)}" for local, glob in sorted(mapping.items())))
+            for seg in segs:
+                seg["speaker"] = mapping[int(seg["speaker"])]
+            merged.extend(segs)
+        if mapping_notes:
+            _append_job_log(session, job, "跨块说话人对齐：" + "；".join(f"块{i + 2} {note}" for i, note in enumerate(mapping_notes)), "info", "transcribing", 0.68)
+        merged.sort(key=lambda s: (s["start_ms"], s["end_ms"]))
+        segments = [dict(seg, speaker=_vllm_speaker_label(int(seg["speaker"]))) for seg in merged]
         session.refresh(job)
         if job.status == "cancelled":
             return None
         result = {
-            "text": "\n".join(str(item.get("text") or "") for item in segments).strip() or _strip_moss_tokens(raw_text),
+            "text": "\n".join(str(item.get("text") or "") for item in segments).strip(),
             "segments": segments,
             "model": "MOSS-Transcribe-Diarize (vLLM pool)",
             "audio_seconds": audio_seconds,
         }
         transcript = _save_transcript(session, job, result, language)
-        _append_job_log(session, job, f"转录完成，共 {len(transcript.text)} 字", "info", "transcribed", 0.72)
+        _append_job_log(session, job, f"转录完成，共 {len(transcript.text)} 字（{len(segments)} 段）", "info", "transcribed", 0.72)
         return transcript
     finally:
         wav_path.unlink(missing_ok=True)
+        for path in chunk_files:
+            path.unlink(missing_ok=True)
         if downloaded and host_path:
             Path(host_path).unlink(missing_ok=True)
 
@@ -2395,11 +2682,13 @@ def _run_transcription(session: Session, job: ProcessingJob, video: VideoAsset, 
         return _run_moss_transcription(session, job, video, language, hotwords)
     if backend == "vllm":
         return _run_vllm_transcription(session, job, video, language, hotwords)
-    if vllm_asr_url(settings):
+    if vllm_asr_url(settings) and not vllm_pool_offline():
         try:
             return _run_vllm_transcription(session, job, video, language, hotwords)
         except VllmAsrUnavailable as exc:
             _append_job_log(session, job, f"vLLM 转录池不可用（{exc}），回退本机 MOSS 慢速道", "warning", "transcribe_queued", 0.28)
+    elif vllm_asr_url(settings):
+        _append_job_log(session, job, "vLLM 转录池健康探活连续失败，直接走本机 MOSS 慢速道", "warning", "transcribe_queued", 0.28)
     return _run_moss_transcription(session, job, video, language, hotwords)
 
 
@@ -3345,4 +3634,6 @@ def _start_state_guard() -> None:
     except Exception:
         traceback.print_exc()
     threading.Thread(target=_sweep_stale_meetings, daemon=True, name="meeting-sweeper").start()
+    if vllm_asr_url():
+        threading.Thread(target=_vllm_health_loop, daemon=True, name="vllm-health-probe").start()
 
