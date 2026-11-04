@@ -1006,3 +1006,165 @@ async def live_meeting(websocket: WebSocket, meeting_id: str, api_key: str | Non
 
 def register_meeting_routes(app) -> None:
     app.include_router(router)
+
+
+# ---------------------------------------------------------------------------
+# 业务背景/热词落库：user_id + session_key 双维度（读取时 session 级优先于 user 级）。
+# 供 agent-web 经 Java 平台代理拉初始值/回写，source 记 "user"；模型走 MCP save_context。
+# 归属域：33 登录用户 / ApiKey 归属用户；服务端凭证（ApiKey、admin）可通过 X-Owner-Id
+# 透传平台侧真实用户标识（Java 代理必传），普通登录用户不允许指定他人归属域。
+# ---------------------------------------------------------------------------
+
+CTX_USER_SCOPE = "__user__"    # 用户级长期默认的哨兵（NULL 不参与唯一索引判重，故用哨兵）
+CTX_ANON_SCOPE = "__anon__"    # 未标识归属（本地调试过渡期）
+CTX_CONTENT_MAX = 20000
+CTX_KEY_MAX = 128
+
+
+class ContextConflictError(ValueError):
+    """并发写入撞唯一约束且回查无行。"""
+
+
+def _scope_token(value: str | None, fallback: str) -> str:
+    """归属/会话键清洗：空白回退哨兵，超长截断（防止唯一键无限长）。"""
+    text = (value or "").strip()
+    if not text:
+        return fallback
+    return text[:CTX_KEY_MAX]
+
+
+def _context_scope_user(session: Session, auth: tuple[str, Any], owner_header: str | None) -> str:
+    kind, principal = auth
+    if owner_header:
+        # 透传归属域仅限服务端凭证：Java 代理持 ApiKey，浏览器用户只能操作自己的
+        if kind == "api_key" or (kind == "user" and getattr(principal, "role", "") == "admin"):
+            return _scope_token(owner_header, CTX_ANON_SCOPE)
+        raise HTTPException(403, "无权指定归属域（X-Owner-Id）")
+    user = _principal_user(session, *auth)
+    return user.id if user else CTX_ANON_SCOPE
+
+
+def _find_context(session: Session, user_scope: str, session_scope: str):
+    from .main import BusinessContext
+
+    return session.scalar(
+        select(BusinessContext).where(BusinessContext.user_id == user_scope, BusinessContext.session_key == session_scope)
+    )
+
+
+def _context_dict(row) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "content": row.content,
+        "hotwords": row.hotwords,
+        "source": row.source,
+        "updated_at": row.updated_at.isoformat(),
+    }
+
+
+def _merge_hotwords(row, value: str | None) -> str | None:
+    """热词语义（REST/MCP 统一）：None = 保留现有（防全量替换静默清空）；空串 = 清空；其余规范化。"""
+    if value is None:
+        return row.hotwords if row is not None else None
+    return normalize_hotwords(value)
+
+
+def upsert_context_row(user_scope: str, session_scope: str, content: str, hotwords: str | None, source: str) -> dict[str, Any]:
+    """按 (user_scope, session_scope) 精确 upsert 一行，自带并发兜底：撞唯一约束后回查转更新重试一次。"""
+    from sqlalchemy.exc import IntegrityError
+
+    from .main import BusinessContext, SessionLocal
+
+    for _attempt in range(2):
+        with SessionLocal() as session:
+            row = _find_context(session, user_scope, session_scope)
+            hotwords_final = _merge_hotwords(row, hotwords)
+            if row is None:
+                session.add(
+                    BusinessContext(user_id=user_scope, session_key=session_scope, content=content, hotwords=hotwords_final, source=source)
+                )
+            else:
+                row.content = content
+                row.hotwords = hotwords_final
+                row.source = source
+                row.updated_at = _now()
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                continue
+            return _context_dict(_find_context(session, user_scope, session_scope))
+    raise ContextConflictError("业务背景写入冲突，请重试")
+
+
+class UpsertContextRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=CTX_CONTENT_MAX)
+    hotwords: str | None = Field(default=None, max_length=500)
+    session_key: str | None = Field(default=None, max_length=CTX_KEY_MAX)
+    # user = 长期默认（session_key 忽略）；session = 会话级快照（必须给 session_key）
+    scope: str = Field(default="user", pattern="^(user|session)$")
+
+
+@router.get("/api/v1/recording-context")
+def get_recording_context(
+    request: Request,
+    session_key: str | None = Query(default=None, max_length=CTX_KEY_MAX),
+    x_owner_id: str | None = Header(default=None, alias="X-Owner-Id"),
+    session: Session = Depends(get_db),
+    auth=Depends(meeting_auth),
+):
+    """拉取业务背景：user 级 + 会话级各自返回，merged 为生效值（会话级优先，回退用户级，带 scope 标注来源）。"""
+    user_scope = _context_scope_user(session, auth, x_owner_id)
+    key = _scope_token(session_key, "")
+    user_row = _find_context(session, user_scope, CTX_USER_SCOPE)
+    session_row = _find_context(session, user_scope, key) if key else None
+    merged_row = session_row if session_row is not None else user_row
+    merged = _context_dict(merged_row)
+    if merged is not None:
+        merged["scope"] = "session" if merged_row is session_row else "user"
+    return {
+        "user": _context_dict(user_row),
+        "session": _context_dict(session_row),
+        "merged": merged,
+    }
+
+
+@router.put("/api/v1/recording-context")
+def upsert_recording_context(
+    payload: UpsertContextRequest,
+    request: Request,
+    x_owner_id: str | None = Header(default=None, alias="X-Owner-Id"),
+    session: Session = Depends(get_db),
+    auth=Depends(meeting_auth),
+):
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(400, "content 不能为空")
+    user_scope = _context_scope_user(session, auth, x_owner_id)
+    session_key = _scope_token(payload.session_key, "")
+    if payload.scope == "session" and not session_key:
+        raise HTTPException(400, "scope=session 时必须提供 session_key")
+    target = session_key if payload.scope == "session" else CTX_USER_SCOPE
+    try:
+        return upsert_context_row(user_scope, target, content, payload.hotwords, "user")
+    except ContextConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.delete("/api/v1/recording-context")
+def delete_recording_context(
+    request: Request,
+    session_key: str | None = Query(default=None, max_length=CTX_KEY_MAX),
+    x_owner_id: str | None = Header(default=None, alias="X-Owner-Id"),
+    session: Session = Depends(get_db),
+    auth=Depends(meeting_auth),
+):
+    """清空业务背景：不传 session_key 清用户级默认，传则清对应会话级快照。"""
+    user_scope = _context_scope_user(session, auth, x_owner_id)
+    key = _scope_token(session_key, "")
+    row = _find_context(session, user_scope, key if key else CTX_USER_SCOPE)
+    if row is not None:
+        session.delete(row)
+        session.commit()
+    return {"deleted": row is not None}

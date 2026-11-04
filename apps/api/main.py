@@ -35,7 +35,7 @@ from .parsers.ugoira import compose_ugoira
 from .auth import get_current_user, get_current_user_flex, require_admin
 from .mcp_asr import mcp_lifespan, mount_asr_mcp
 from .templates_loader import HOME_DEFAULT_NAMES, find_builtin_template, load_builtin_templates, template_sort_key
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Text, create_engine, func, or_, select, text
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Text, UniqueConstraint, create_engine, func, or_, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./media_platform.db")
@@ -285,6 +285,31 @@ class UserSession(Base):
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class BusinessContext(Base):
+    """业务背景/热词落库：user_id + session_key 双维度，读取时 session 级优先于 user 级。
+
+    - user_id：归属域（33 登录用户 id、ApiKey 归属用户 id，或 Java 代理/模型透传的平台用户
+      标识 X-Owner-Id / owner 参数，不透明字符串）。'__anon__' = 未标识（本地调试过渡期）。
+      哨兵值而非 NULL：NULL 在唯一索引里不判重，并发插入会产生重复行。
+    - session_key：'__user__' = 用户级长期默认；其余 = 会话级快照键（Java 会话 id 等）。
+    - source: user（前端保存）/ model（模型经 MCP save_context 写入）。
+    """
+
+    __tablename__ = "business_contexts"
+    __table_args__ = (
+        # 唯一索引即 (user_id, session_key) 复合查询索引，无需另建普通索引
+        UniqueConstraint("user_id", "session_key", name="uq_business_contexts_user_session"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(128), default="__anon__")
+    session_key: Mapped[str] = mapped_column(String(128), default="__user__")
+    content: Mapped[str] = mapped_column(Text)
+    hotwords: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(16), default="user")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 Base.metadata.create_all(engine)

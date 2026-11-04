@@ -420,6 +420,81 @@ def result(task_id: str, include_segments: bool = True) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 业务背景/热词：模型读写（business_contexts 表，会话级快照 + 用户级长期沉淀）。
+# owner 语义：透传平台侧真实用户标识（前端录音指令中注入），保证按平台用户隔离；
+# 未提供时回退 ApiKey 归属用户，再回退 '__anon__'（仅本地调试会出现）。
+# 与 REST 的语义差异（有意设计，勿混用排障）：save_context 是模型沉淀通道，带
+# session_key 时双写会话级快照 + 用户级长期版本；REST PUT 是精确单层写入。
+# ---------------------------------------------------------------------------
+
+
+def _find_context_row(session: Session, user_scope: str, session_scope: str):
+    from .meetings import _find_context
+
+    return _find_context(session, user_scope, session_scope)
+
+
+@mcp.tool
+def get_context(session_key: str | None = None, owner: str | None = None) -> dict[str, Any]:
+    """读取当前生效的业务背景与热词（会话级优先，回退用户级长期版本）。owner 传指令中给出的归属标识；转写前可调用确认正确写法。"""
+    from .main import SessionLocal
+    from .meetings import CTX_ANON_SCOPE, CTX_KEY_MAX, CTX_USER_SCOPE, _scope_token
+
+    with SessionLocal() as session:
+        _, owner_user = _key_principal(session)
+        fallback = owner_user.id if owner_user else CTX_ANON_SCOPE
+        user_scope = _scope_token(owner, fallback)
+        key = _scope_token(session_key, "")[:CTX_KEY_MAX]
+        row = _find_context_row(session, user_scope, key) if key else None
+        scope = None
+        if row is not None:
+            scope = "session"
+        else:
+            row = _find_context_row(session, user_scope, CTX_USER_SCOPE)
+            scope = "user" if row is not None else None
+        return {
+            "content": row.content if row else None,
+            "hotwords": row.hotwords if row else None,
+            "source": row.source if row else None,
+            "scope": scope,
+        }
+
+
+@mcp.tool
+def save_context(content: str, hotwords: str | None = None, session_key: str | None = None, owner: str | None = None) -> dict[str, Any]:
+    """保存业务背景（含本次修正），供后续会话复用。生成纪要并完成「业务背景修正」小节后调用；content 传修正扩充后的完整版本（上限 20000 字）。owner 传指令中给出的归属标识。提供 session_key 时同时写会话级快照与用户级长期版本；hotwords 未传时保留现有值，传空串清空。"""
+    from .main import SessionLocal
+    from .meetings import (
+        CTX_ANON_SCOPE,
+        CTX_CONTENT_MAX,
+        CTX_KEY_MAX,
+        CTX_USER_SCOPE,
+        ContextConflictError,
+        _scope_token,
+        upsert_context_row,
+    )
+
+    text = (content or "").strip()
+    if not text:
+        raise ToolError("content 不能为空")
+    if len(text) > CTX_CONTENT_MAX:
+        raise ToolError(f"content 超过 {CTX_CONTENT_MAX} 字上限")
+    key = _scope_token(session_key, "")[:CTX_KEY_MAX]
+    with SessionLocal() as session:
+        _, owner_user = _key_principal(session)
+    fallback = owner_user.id if owner_user else CTX_ANON_SCOPE
+    user_scope = _scope_token(owner, fallback)
+    scopes: list[str] = []
+    try:
+        for target in ([key, CTX_USER_SCOPE] if key else [CTX_USER_SCOPE]):
+            upsert_context_row(user_scope, target, text, hotwords, "model")
+            scopes.append("session" if target != CTX_USER_SCOPE else "user")
+    except ContextConflictError as exc:
+        raise ToolError(str(exc)) from exc
+    return {"saved": True, "scopes": scopes}
+
+
+# ---------------------------------------------------------------------------
 # 挂载：/mcp → streamable-http app（带 API Key 中间件）
 # ---------------------------------------------------------------------------
 
