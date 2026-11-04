@@ -3531,9 +3531,11 @@ def delete_video(video_id: str, background_tasks: BackgroundTasks, user: Any = D
 
 from .meetings import register_meeting_routes
 from .auth import register_auth_routes
+from .agent_transcriptions import register_agent_transcription_routes
 
 register_meeting_routes(app)
 register_auth_routes(app)
+register_agent_transcription_routes(app)
 
 
 def _stale_seconds() -> float:

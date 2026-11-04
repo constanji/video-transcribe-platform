@@ -329,6 +329,62 @@ def _run_agent_pipeline(meeting_id: str, audio_url: str, template_id: str | None
 # MCP 工具（3 个，契约见设计文档 §3）
 # ---------------------------------------------------------------------------
 
+def _submit_transcription(
+    session: Session,
+    *,
+    audio_url: str,
+    title: str | None,
+    language: str,
+    template_id: str | None,
+    business_context: str | None,
+    hotwords: str | None,
+    api_key=None,
+    owner=None,
+) -> str:
+    """创建 Meeting 并起后台流水线，返回 task_id（= meeting_id）。
+
+    MCP transcribe 工具与 REST /api/v1/agent/transcriptions 共用；
+    校验失败抛 ValueError（MCP 转 ToolError，REST 转 HTTPException 400），
+    principal 由调用方显式传入（MCP 从 header 反查，REST 从 meeting_auth 依赖取）。
+    """
+    from .main import Meeting, SummaryTemplate
+    from .meetings import ensure_meeting_video, normalize_hotwords
+
+    parsed = urlparse(audio_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("audio_url 必须是 http(s) 预签名 GET URL")
+    if language not in {"zh", "auto", "en"}:
+        raise ValueError("language 仅支持 zh / auto / en")
+    if template_id is not None and session.get(SummaryTemplate, template_id) is None:
+        raise ValueError(f"纪要模板不存在：{template_id}")
+    stamp = _now().astimezone().strftime("会议 %Y-%m-%d %H:%M")
+    meeting = Meeting(
+        title=(title or "").strip() or stamp,
+        mode="recording",
+        language=language,
+        audio_source="mic",
+        status="downloading",
+        live_segments_json=[],
+        hotwords=normalize_hotwords(hotwords),
+        user_id=owner.id if owner else None,
+        # agent 来源标记：api_key_id 非空即 agent 发起（预留字段复用，零迁移）
+        api_key_id=api_key.id if api_key else None,
+    )
+    session.add(meeting)
+    session.flush()
+    ensure_meeting_video(session, meeting)
+    session.refresh(meeting)
+    task_id = meeting.id
+
+    threading.Thread(
+        target=_run_agent_pipeline,
+        args=(task_id, audio_url, template_id, business_context),
+        daemon=True,
+        name=f"agent-asr-{task_id[:8]}",
+    ).start()
+    return task_id
+
+
 @mcp.tool
 def transcribe(
     audio_url: str,
@@ -339,44 +395,24 @@ def transcribe(
     hotwords: str | None = None,
 ) -> dict[str, Any]:
     """提交会议音频转写任务（异步）。audio_url 为可内网访问的预签名 GET URL；返回 task_id 后用 asr_status 轮询、asr_result 取结果。提供 template_id 时转录完成后自动生成纪要。"""
-    from .main import Meeting, SessionLocal, SummaryTemplate
-    from .meetings import ensure_meeting_video, normalize_hotwords
+    from .main import SessionLocal
 
-    parsed = urlparse(audio_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ToolError("audio_url 必须是 http(s) 预签名 GET URL")
-    if language not in {"zh", "auto", "en"}:
-        raise ToolError("language 仅支持 zh / auto / en")
-
-    with SessionLocal() as session:
-        if template_id is not None and session.get(SummaryTemplate, template_id) is None:
-            raise ToolError(f"纪要模板不存在：{template_id}")
-        api_key, owner = _key_principal(session)
-        stamp = _now().astimezone().strftime("会议 %Y-%m-%d %H:%M")
-        meeting = Meeting(
-            title=(title or "").strip() or stamp,
-            mode="recording",
-            language=language,
-            audio_source="mic",
-            status="downloading",
-            live_segments_json=[],
-            hotwords=normalize_hotwords(hotwords),
-            user_id=owner.id if owner else None,
-            # agent 来源标记：api_key_id 非空即 agent 发起（预留字段复用，零迁移）
-            api_key_id=api_key.id if api_key else None,
-        )
-        session.add(meeting)
-        session.flush()
-        ensure_meeting_video(session, meeting)
-        session.refresh(meeting)
-        task_id = meeting.id
-
-    threading.Thread(
-        target=_run_agent_pipeline,
-        args=(task_id, audio_url, template_id, business_context),
-        daemon=True,
-        name=f"agent-asr-{task_id[:8]}",
-    ).start()
+    try:
+        with SessionLocal() as session:
+            api_key, owner = _key_principal(session)
+            task_id = _submit_transcription(
+                session,
+                audio_url=audio_url,
+                title=title,
+                language=language,
+                template_id=template_id,
+                business_context=business_context,
+                hotwords=hotwords,
+                api_key=api_key,
+                owner=owner,
+            )
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
     return {"task_id": task_id, "status": "downloading"}
 
 
@@ -392,31 +428,37 @@ def status(task_id: str) -> dict[str, Any]:
     return payload
 
 
+def _agent_result_payload(session: Session, meeting, include_segments: bool = True) -> dict[str, Any]:
+    """MCP result 工具与 REST .../result 共用的结果组装。"""
+    from .main import Summary, _latest_transcript, summary_dict
+
+    state = _agent_status(session, meeting)
+    if state["status"] not in {"completed", "failed", "cancelled"}:
+        return {"task_id": meeting.id, "status": state["status"], "progress": state["progress"], "error": None}
+    transcript = _latest_transcript(session, meeting.video_asset_id) if meeting.video_asset_id else None
+    summary = None
+    if meeting.video_asset_id:
+        summary = session.scalars(
+            select(Summary).where(Summary.video_asset_id == meeting.video_asset_id).order_by(Summary.created_at.desc())
+        ).first()
+    return {
+        "task_id": meeting.id,
+        "status": state["status"],
+        "error": state["error"],
+        "transcript": transcript.text if transcript else None,
+        "segments": transcript.segments_json if (transcript and include_segments) else None,
+        "summary": summary_dict(summary)["content_markdown"] if summary else None,
+    }
+
+
 @mcp.tool
 def result(task_id: str, include_segments: bool = True) -> dict[str, Any]:
     """取转写结果（须任务完成）。返回转写全文；include_segments 时带分段；提供过模板时带纪要 markdown。"""
-    from .main import SessionLocal, Summary, _latest_transcript, summary_dict
+    from .main import SessionLocal
 
     with SessionLocal() as session:
         meeting = _get_agent_meeting(session, task_id)
-        state = _agent_status(session, meeting)
-        if state["status"] not in {"completed", "failed", "cancelled"}:
-            return {"task_id": task_id, "status": state["status"], "progress": state["progress"], "error": None}
-        transcript = _latest_transcript(session, meeting.video_asset_id) if meeting.video_asset_id else None
-        summary = None
-        if meeting.video_asset_id:
-            summary = session.scalars(
-                select(Summary).where(Summary.video_asset_id == meeting.video_asset_id).order_by(Summary.created_at.desc())
-            ).first()
-        payload: dict[str, Any] = {
-            "task_id": task_id,
-            "status": state["status"],
-            "error": state["error"],
-            "transcript": transcript.text if transcript else None,
-            "segments": transcript.segments_json if (transcript and include_segments) else None,
-            "summary": summary_dict(summary)["content_markdown"] if summary else None,
-        }
-        return payload
+        return _agent_result_payload(session, meeting, include_segments)
 
 
 # ---------------------------------------------------------------------------
